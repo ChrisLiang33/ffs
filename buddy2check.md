@@ -250,10 +250,94 @@ Things considered but **not** taken:
 - **Tighter action ranges** (α∈[0.5,3], φ∈[0.1,2]): would cap the worst case but artificially constrains what RL can learn. Rejected — we want learned bounds, not hand-tuned ones.
 - **Iter-50 re-eval** (training-time peak): training logs showed iter-50 goal/crash ~ 84%/4% vs iter-399 ~ 83%/5.5%, a 1-pt difference on noisy training metrics. Not large enough to explain the 7-pt eval gap. Even if iter-50 was better, the action distribution likely has the same degeneracy. Skipped.
 
-## 14. Open question — is the CNN/encoder actually being used?
+## 14. Encoder check — CNN is alive
 
-The next diagnostic: **does the policy's action depend on what's in the BEV?** If a trained policy outputs identical (α, φ) distributions on `open` (empty BEV) vs `corridor` (4 obstacles), the encoder is being ignored and PPO learned a scene-blind degenerate policy. That would mean the CNN never learned to read obstacles — and the right α=5/φ=0 is the optimal *scene-blind* policy for the reward landscape.
+Ran 3 archs × {open, corridor} action dumps to test whether actions depend on BEV content.
 
-If actions DO depend on the BEV (e.g., higher φ on corridor than open), the encoder is alive but the reward shaping is still pushing PPO toward an aggressive operating point — and we need to look at reward weights again, or at why PPO can't find the ISSf-like local optimum.
+| arch | scene    | α mean | α std | φ mean | φ std |
+| ---- | -------- | ------ | ----- | ------ | ----- |
+| A    | open     | 4.91   | 0.66  | 0.21   | 1.37  |
+| A    | corridor | 4.59   | 1.28  | 0.52   | 2.05  |
+| B    | open     | 4.94   | 0.50  | 0.27   | 1.55  |
+| B    | corridor | 4.53   | 1.33  | 0.50   | 1.96  |
+| D    | open     | 4.59   | 1.31  | 0.73   | 2.48  |
+| D    | corridor | 4.37   | 1.52  | 1.02   | 2.82  |
 
-Test in flight: 6 evals (3 archs × 2 scenes) with action-dump.
+Going `open → corridor`: α drops, φ rises, std goes up. **Directions are correct** — more obstacles → less aggressive, more robust, more action variance. CNN is reading the BEV.
+
+But the *magnitudes* are tiny. Median α stays at 5.00 and median φ stays at 0.01 on both scenes. The mean shifts come from occasional excursions, not steady-state. **The policy uses perception as a panic brake, not as steady-state guidance.**
+
+## 15. Discount bump (γ=0.99 → 0.995) — didn't help
+
+Hypothesis: late-episode rewards were too discounted; crashes near the end of an episode were nearly free.
+
+Retrained A and D with γ=0.995 + the −200 crash penalty. Corridor crash rates:
+
+| | overnight (γ=0.99, crash=−50) | γ=0.99, crash=−200 | γ=0.995, crash=−200 |
+| --- | --- | --- | --- |
+| Arch A corridor crash | 10.6% | 11.3% | 10.5% |
+| Arch D corridor crash | 9.3% | 7.4% | 8.0% |
+
+Action distributions essentially unchanged. α median still 5.00. **Discount wasn't the bottleneck.**
+
+## 16. Bisect — was the corner-attractor always there?
+
+Used `dump_action.py` against a Section-6-era winning checkpoint (`logs/rsl_rl/cbf_goal_go2/2026-05-26_23-09-33/model_199.pt`) running on the old commit (5e832ba — GT-obstacle obs, GT-obstacle CBF, no DR).
+
+|           | Section-6 WIN era | Today (iter-399 broken) |
+| --------- | ----------------- | ----------------------- |
+| α mean    | 3.68              | 4.59                    |
+| α p25     | **2.75**          | 5.00                    |
+| α p50     | 4.24              | 5.00                    |
+| α p95     | 5.00              | 5.00                    |
+| φ p50     | 0.01 (min)        | 0.01 (min)              |
+| φ p95     | 2.99              | 4.86                    |
+
+**The corner attractor was always there.** Even the winning policy ran α near the cap and pegged φ at the floor. The difference vs today is modest extra spread on α (p25 2.75 vs 0.10).
+
+So the policy isn't fundamentally broken now — it's behaving similarly to when it won.
+
+## 17. Real diagnosis — the pipeline got harder
+
+Cross-checking ISSf's own performance across eras shows the pipeline got harder, not the policy worse:
+
+| era | ISSf reach | **ISSf crash** |
+| --- | --- | --- |
+| Section 6 (GT obs + GT-CBF, no DR) | 91.2% | **0.7%** |
+| Section 12 (BEV obs + BEV-CBF, full DR) | ~94% | **~5%** |
+
+**ISSf's crash rate jumped 7×.** Same fixed policy, way more crashes — because the deployment-realistic stack (BEV grid CBF, lidar noise, DR pushes, mass/friction variation) is genuinely harder for any fixed policy. The CBF projection is fuzzier (16×16 grid vs GT positions), no L_f h to predict obstacle motion.
+
+The win in Section 6 wasn't "RL learned to be smart." It was: aggressive policy + precise CBF = works. The precise CBF caught the rare near-misses. In the new regime: aggressive policy + fuzzy CBF = crashes.
+
+**ISSf survives the new pipeline because it's robust by construction** (fixed conservative point, no dependence on observation precision). RL's "aggressive + panic-brake" pattern *needs* a precise brake to work.
+
+## 18. Things rejected (and why)
+
+- **Per-step h-based safety reward** (`-k·relu(threshold - h)` each step). Would push PPO away from the corner by penalizing near-obstacle steady states. *Rejected*: creates an "invisible force field" that duplicates what the CBF is supposed to do. The design is CBF→safety, CNN→perception, RL→modulation. Reward shouldn't bake in safety; that's what the CBF guarantees.
+- **Higher-resolution BEV** (32×32 instead of 16×16). Would let the existing aggressive policy do the same Section-6 trick. *Rejected*: backs out of the deployment-realistic story.
+
+## 19. ISSf-anchor init — current test
+
+Initialize the policy's last-layer bias so the initial mean output is α=2.0, φ=0.5 (the ISSf anchor) instead of the default α=2.55, φ=5.0. The patch:
+
+```python
+# in cbf_go2/cnn_actor.py
+_ANCHOR_NORM = (-0.224, -0.902)   # alpha=2.0, phi=0.5 in normalized space
+
+def _init_head_at_anchor(encoder):
+    final = encoder.head[-1]
+    with torch.no_grad():
+        final.weight.zero_()
+        final.bias[0] = _ANCHOR_NORM[0]
+        final.bias[1] = _ANCHOR_NORM[1]
+```
+
+Applied to TeacherActor, StudentActor, LongHistActor. Initial actor output is exactly anchor; weights grow from zero.
+
+The question this test answers: **is the corner the only local optimum, or just where 0-init lands?**
+
+- If PPO stays near anchor → corner wasn't fundamental, init was holding us back. Expect RL to beat ISSf because it can modulate.
+- If PPO drifts back to the corner → the corner is genuinely better in PPO's reward landscape. Need a deeper fix (longer training, Beta distribution policy, or revisit reward design entirely).
+
+Retraining A and D, 200 iters each. Crash penalty stays at -200 and γ at 0.995 (changes carried over from sections 13 and 15 — they didn't help but they don't hurt; cleaner to vary one thing at a time).

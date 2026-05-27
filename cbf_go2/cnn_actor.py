@@ -22,6 +22,20 @@ POLICY_DIM = PROPRIO_DIM + BEV_DIM    # 783
 PRIV_DIM = 4
 Z_DIM = 16
 
+# ISSf anchor in normalized action space.
+# alpha=2.0 in [0.1, 5.0] -> 2*(2.0-0.1)/(5.0-0.1) - 1 = -0.224
+# phi=0.5   in [0.01, 10.0] -> 2*(0.5-0.01)/(10.0-0.01) - 1 = -0.902
+_ANCHOR_NORM = (-0.224, -0.902)
+
+
+def _init_head_at_anchor(encoder: nn.Module) -> None:
+    """Bias the encoder's final linear so initial actor output = ISSf anchor."""
+    final = encoder.head[-1]
+    with torch.no_grad():
+        final.weight.zero_()
+        final.bias[0] = _ANCHOR_NORM[0]
+        final.bias[1] = _ANCHOR_NORM[1]
+
 
 class _TeacherEncoder(nn.Module):
     """Three-branch encoder: proprio MLP + bev CNN + priv MLP -> fused -> output_dim."""
@@ -111,6 +125,7 @@ class TeacherActor(MLPModel):
         self.mlp = _TeacherEncoder(output_dim=mlp_out, has_priv=True)
         if self.distribution is not None:
             self.distribution.init_mlp_weights(self.mlp)
+        _init_head_at_anchor(self.mlp)
 
 
 class TeacherCritic(MLPModel):
@@ -158,6 +173,7 @@ class StudentActor(MLPModel):
         self.mlp = _TeacherEncoder(output_dim=mlp_out, has_priv=False)
         if self.distribution is not None:
             self.distribution.init_mlp_weights(self.mlp)
+        _init_head_at_anchor(self.mlp)
 
 
 class StudentCritic(MLPModel):
@@ -232,6 +248,7 @@ class LongHistActor(MLPModel):
         self.mlp = _LongHistEncoder(output_dim=mlp_out)
         if self.distribution is not None:
             self.distribution.init_mlp_weights(self.mlp)
+        _init_head_at_anchor(self.mlp)
 
 
 class LongHistCritic(MLPModel):
