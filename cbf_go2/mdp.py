@@ -50,9 +50,43 @@ def velocity_to_goal(
     return (asset.data.root_lin_vel_w[:, :2] * unit).sum(dim=1)
 
 
+def action_rate_clamped(env: ManagerBasedRLEnv, term_name: str = "cbf_params") -> torch.Tensor:
+    """||raw_t - raw_{t-1}||^2 using the clamped raw actions on a CBFParamsAction term."""
+    term = env.action_manager.get_term(term_name)
+    return torch.sum(torch.square(term.raw_actions - term.prev_raw_actions), dim=1)
+
+
+def last_action_clamped(env: ManagerBasedRLEnv, term_name: str = "cbf_params") -> torch.Tensor:
+    """Last action as observation, read from the action term's clamped raw buffer."""
+    return env.action_manager.get_term(term_name).raw_actions
+
+
 def timeout_fired(env: ManagerBasedRLEnv) -> torch.Tensor:
     """1.0 on the step time_out fires (episode hit max length), else 0."""
     return env.termination_manager.time_outs.float()
+
+
+def randomize_obstacle_positions(
+    env: ManagerBasedRLEnv,
+    env_ids: torch.Tensor,
+    obstacle_names: tuple,
+    range_xy: float = 2.5,
+    min_dist_from_origin: float = 0.8,
+) -> None:
+    """Each reset: place every obstacle at a random (x, y), kept >= min_dist from spawn origin."""
+    n = len(env_ids)
+    for name in obstacle_names:
+        obstacle = env.scene[name]
+        x = torch.empty(n, device=env.device).uniform_(-range_xy, range_xy)
+        y = torch.empty(n, device=env.device).uniform_(-range_xy, range_xy)
+        dist = torch.sqrt(x * x + y * y).clamp_min(1e-6)
+        scale = (min_dist_from_origin / dist).clamp_min(1.0)
+        x = x * scale
+        y = y * scale
+        new_pose = obstacle.data.default_root_state[env_ids, :7].clone()
+        new_pose[:, 0] = x + env.scene.env_origins[env_ids, 0]
+        new_pose[:, 1] = y + env.scene.env_origins[env_ids, 1]
+        obstacle.write_root_pose_to_sim(new_pose, env_ids=env_ids)
 
 
 def tissf_action(

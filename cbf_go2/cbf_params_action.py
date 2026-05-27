@@ -27,10 +27,8 @@ class CBFParamsAction(ActionTerm):
         self.robot: Articulation = env.scene[cfg.asset_name]
         self._inner = nav_mdp.PreTrainedPolicyAction(cfg.inner_cfg, env)
         self._raw_actions = torch.zeros((self.num_envs, 2), device=self.device)
-        # obstacles are kinematic -> cache positions once at init
-        self._obs_xy = torch.stack(
-            [env.scene[name].data.root_pos_w[:, :2] for name in cfg.obstacle_names], dim=1
-        )
+        self._prev_raw_actions = torch.zeros_like(self._raw_actions)
+        self._obstacle_names = cfg.obstacle_names
 
     @property
     def action_dim(self) -> int:
@@ -51,7 +49,12 @@ class CBFParamsAction(ActionTerm):
         return torch.stack([alpha, phi], dim=1)
 
     def process_actions(self, actions: torch.Tensor):
-        self._raw_actions[:] = actions
+        self._prev_raw_actions[:] = self._raw_actions
+        self._raw_actions[:] = actions.clamp(-1.0, 1.0)
+
+    @property
+    def prev_raw_actions(self) -> torch.Tensor:
+        return self._prev_raw_actions
 
     def apply_actions(self):
         # u_nom: unit vector toward goal in body frame
@@ -68,11 +71,14 @@ class CBFParamsAction(ActionTerm):
             2 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
             1 - 2 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
         )
+        obs_xy = torch.stack(
+            [self._env.scene[name].data.root_pos_w[:, :2] for name in self._obstacle_names], dim=1
+        )
         u_safe = cbf.safety_filter(
             u_nom=u_nom,
             robot_xy=self.robot.data.root_pos_w[:, :2],
             robot_yaw=yaw,
-            obs_xy=self._obs_xy,
+            obs_xy=obs_xy,
             obstacle_radius=self.cfg.obstacle_radius,
             robot_radius=self.cfg.robot_radius,
             alpha=params[:, 0],
@@ -80,6 +86,8 @@ class CBFParamsAction(ActionTerm):
             lam=self.cfg.lam,
             gamma=self.cfg.gamma,
         )
+        # belt-and-suspenders: NaN guard + clamp to locomotion training range
+        u_safe = torch.nan_to_num(u_safe, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
 
         # hand u_safe to the frozen-locomotion inner term, then drive it
         self._inner._raw_actions[:] = u_safe

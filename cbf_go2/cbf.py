@@ -40,10 +40,15 @@ def compute_h(
     lam: float = 1.0,
     gamma: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """h_smooth = lambda * (1 - exp(-gamma * sdf)) and its gradient via chain rule."""
-    h = lam * (1.0 - torch.exp(-gamma * sdf))
-    dh_dsdf = lam * gamma * torch.exp(-gamma * sdf)
-    h_grad = dh_dsdf.unsqueeze(-1) * sdf_grad
+    """h_smooth = lambda * (1 - exp(-gamma * sdf)) and its gradient via chain rule.
+
+    Clamp the exp argument so deeply-negative sdf doesn't blow up the gradient
+    (caps |grad| at lam * gamma * e^5 ~ 148 per unit sdf_grad).
+    """
+    arg = (-gamma * sdf).clamp(max=5.0)
+    exp_arg = torch.exp(arg)
+    h = lam * (1.0 - exp_arg)
+    h_grad = (lam * gamma * exp_arg).unsqueeze(-1) * sdf_grad
     return h, h_grad
 
 

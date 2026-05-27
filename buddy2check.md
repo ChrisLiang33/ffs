@@ -86,6 +86,34 @@ Note: prior smoke runs gave ISSf 95%/1% — those were small-sample noise (~50-1
 - **lambda = gamma = 1** — coupled with φ (λγ is the gradient magnitude at the boundary). Tuning λ, γ separately is largely redundant with tuning φ.
 - **4 obstacles, fixed positions.** Trivial scene. Once RL is training, randomize per-reset.
 
+## 6. Scene diversity — adds obstacle randomization
+
+Random obstacle placement per reset (4 cylinders, xy in (-2.5, 2.5)², `min_dist_from_origin=0.8`). Retrained RL, re-ran TISSf sweep, re-evaluated all three on the randomized env.
+
+| method | reach | crash | timeout |
+| --- | --- | --- | --- |
+| ISSf (α=2, φ=0.5) | 76.0% [73.9, 78.1] | 15.0% [13.3, 16.8] | 9.0% |
+| TISSf best (ε₀=2, λ=0.5) | 76.6% [74.5, 78.5] | 15.9% [14.2, 17.6] | 7.6% |
+| **RL (random-trained)** | **80.2% [78.3, 82.0]** | 13.3% [11.9, 15.0] | 6.4% |
+
+**RL still wins on reach** (non-overlapping CIs, +4.2 pts over both baselines). Crash advantage narrowed (CIs overlap on safety in random scenes).
+
+**Cross-scene RL edge:**
+
+| scene | RL reach edge | RL crash edge |
+| --- | --- | --- |
+| Fixed (1 layout) | +3.8 pts (94 vs 90) | strong (0.5 vs 4.0) |
+| Random | +4.2 pts (80 vs 76) | weak (13 vs 15) |
+
+The ~15% baseline crash rate is mostly structural — `min_dist_from_origin=0.8` plus a robot spawn box of ±0.5 occasionally places obstacles right on the robot, instant collision. Higher `min_dist` (1.5) destabilizes training (still investigating; likely event-ordering issue with reset).
+
+## Things that took time
+
+- **Action space normalization.** Policy outputs Gaussian samples; needed to (a) clamp at the action term, (b) make `action_rate` read the clamped version, (c) make `last_action` observation read the clamped version. Otherwise the policy sees its own ±5 outputs as observations and self-feedback diverges.
+- **CBF defensive math.** `compute_h` exp arg clamped at 5 (was blowing up when sdf << 0), `safety_filter` output wrapped in `nan_to_num` + `clamp(-1, 1)` to avoid OOD velocity commands to the locomotion.
+
 ## Next
 
-Reward function + PPO training: learn `(alpha, phi)` to beat the ISSf baseline on time-to-goal at matched (or better) crash rate. Then TISSf baseline (φ as a hand-coded function of state) as the harder bar to clear.
+- **Uncertainty DR** (friction, payload, motor strength, push intensity). This is the *other* DR axis — should widen RL's crash edge specifically, since ISSf has to be worst-case for all DR samples while RL can react to the realized one.
+- **Fix the spawn-collision issue** in randomization (event order or reject-sample) so the 15% structural-crash floor goes away and we can see safety differences cleanly.
+- **Multiple seeds** before committing to paper numbers.

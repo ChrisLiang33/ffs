@@ -11,6 +11,7 @@ import isaaclab.sim as sim_utils
 import isaaclab_tasks.manager_based.navigation.mdp as nav_mdp
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg, mdp
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
@@ -75,7 +76,7 @@ class ObservationsCfg:
         base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
         goal = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
-        actions = ObsTerm(func=mdp.last_action)
+        actions = ObsTerm(func=cbf_mdp.last_action_clamped)
         obstacles = ObsTerm(
             func=cbf_mdp.obstacles_body_frame,
             params={"obstacle_names": OBSTACLE_NAMES},
@@ -104,7 +105,7 @@ class RewardsCfg:
         weight=-50.0,
         params={"term_keys": ["obstacle_hit", "base_contact"]},
     )
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+    action_rate = RewTerm(func=cbf_mdp.action_rate_clamped, weight=-0.05)
     timeout_penalty = RewTerm(func=cbf_mdp.timeout_fired, weight=-50.0)
 
 
@@ -171,5 +172,16 @@ class GoalGo2EnvCfg(ManagerBasedRLEnvCfg):
                     axis="Z",
                     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 1.0, 0.1)),
                 ),
+            },
+        )
+
+        # randomize obstacle positions per reset (scene diversity)
+        self.events.randomize_obstacles = EventTerm(
+            func=cbf_mdp.randomize_obstacle_positions,
+            mode="reset",
+            params={
+                "obstacle_names": OBSTACLE_NAMES,
+                "range_xy": 2.5,
+                "min_dist_from_origin": 0.8,
             },
         )
