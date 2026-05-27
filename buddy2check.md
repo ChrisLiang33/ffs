@@ -341,3 +341,94 @@ The question this test answers: **is the corner the only local optimum, or just 
 - If PPO drifts back to the corner → the corner is genuinely better in PPO's reward landscape. Need a deeper fix (longer training, Beta distribution policy, or revisit reward design entirely).
 
 Retraining A and D, 200 iters each. Crash penalty stays at -200 and γ at 0.995 (changes carried over from sections 13 and 15 — they didn't help but they don't hurt; cleaner to vary one thing at a time).
+
+## 20. Extended ISSf φ sweep — φ=1.0 is the universal optimum
+
+Swept φ ∈ {1.5, 2.0, 3.0} on top of the original {0.1, 0.2, 0.5, 1.0}. Time-to-reach added to the analysis (buddy's pushback: "high φ might take detours / fail to fit through narrow"):
+
+| scene    | best-φ | reach  | crash | timeout | t_reach (s) |
+| -------- | ------ | ------ | ----- | ------- | ----------- |
+| in_dist  | 1.0    | 93.8%  | 5.5%  | 0.7%    | 14.00       |
+| open     | any    | 96.5%  | 3.5%  | 0%      | 15.31       |
+| sparse   | 1.0    | 95.0%  | 4.6%  | 0.4%    | 14.18       |
+| corridor | 1.0    | 93.9%  | 4.6%  | 1.6%    | 13.71       |
+| slalom   | 1.0    | 93.9%  | 4.7%  | 1.5%    | 13.11       |
+| narrow   | 1.0    | 95.1%  | 4.4%  | 0.5%    | 14.01       |
+| gauntlet | 1.0    | 94.3%  | 4.9%  | 0.8%    | 13.12       |
+
+**φ=1.0 dominates every scene with obstacles, monotonically.** Beyond 1.0:
+
+- corridor reach drops 93.9 → 84.0% as φ goes 1.0 → 3.0
+- corridor timeouts jump 1.6 → 5.3% (buddy was right about "too conservative to fit")
+- slalom timeouts 1.5 → 4.2%
+
+Also interesting: higher φ is *faster*, not slower. Smooth large-radius avoidance beats panic-brake U-turns. t_reach drops 14.11 → 13.71 (corridor) and 13.95 → 13.11 (slalom) going φ=0.1 → 1.0.
+
+**Verdict: there is no adaptation upside in our scene set.** A single fixed (α=2, φ=1.0) dominates everywhere. RL's job becomes "find the right fixed point," not "adapt per scene."
+
+## 21. CBF intervention rate — confirms α=5 kills the constraint
+
+Added `cbf intervention rate` (fraction of steps where `safety_filter_grid` actually projects `u_nom → u_safe`, defined as `||u_safe - u_nom||_∞ > 1e-4`) to `dump_action.py` and `eval_cbf.py`. Buddy's hypothesis: at α=5 the CBF is effectively off, so φ never gets a learning signal.
+
+Confirmed cleanly on corridor:
+
+| | α | φ | **CBF acts** | crash |
+| --- | --- | --- | --- | --- |
+| RL iter-399 (broken, α pegged 5) | 4.69 | 0.23 | **11.7%** | 10.5% |
+| ISSf (α=2, φ=0.5) | 2.0 | 0.5 | **43.1%** | 7.1% |
+| ISSf (α=2, φ=1.0) — best | 2.0 | 1.0 | **54.3%** | 6.4% |
+
+**RL's CBF is intervening on 11.7% of steps — basically off.** ISSf-1.0 intervenes 54.3%, almost 5×. The mechanism: high α makes the constraint `A·u ≥ φ·||A||² − α·h` trivially satisfied when `h > 0` (safe region), so the CBF only fires in a tiny boundary layer. Inside the safe region, the constraint is vacuous → φ has no effect on actions → no gradient signal → φ drifts to the Gaussian tail (0.01).
+
+The chain: progress reward favors fast motion → high α → CBF off → φ stops mattering → corner attractor at (α=5, φ=0.01).
+
+## 22. Progress weight 1.0 → 0.2 + anchor (α=2, φ=0.5)
+
+Stack: anchor (α=2, φ=0.5) + progress=0.2 + crash=−200 + γ=0.995. Retrained A and D, 200 iters.
+
+| | α p50 | φ p50 | CBF acts | crash (corridor) |
+| --- | --- | --- | --- | --- |
+| Arch A | 5.00 | 0.01 | 22.8% | 11.3% |
+| Arch D | **0.10** | 0.01 | **47.7%** | 9.0% |
+
+**Arch D escaped the high-α corner — but landed at the OPPOSITE corner (α=0.1, CBF too restrictive).** Bimodal: p25=0.10, p75=5.00. φ still pegged at 0.01 because α=0.10 still leaves the constraint dominated by −α·h, and φ·||A||² is tiny. So the policy is *using* the CBF much more (47.7% vs 11.7%) but not at the right operating point.
+
+**Arch A stayed at the high-α corner.** Hypothesis: priv obs (friction/mass/body_h) gives extra signal that the policy uses to "trust the locomotion" and stay aggressive. Arch D without priv has to be more cautious by default.
+
+Either way, neither arch matched ISSf-1.0's 6.4% crash on corridor.
+
+## 23. Anchor bumped to (α=2, φ=1.0) — both archs drifted back to corner
+
+Stack: anchor (α=2, φ=**1.0**) + progress=0.2 + crash=−200 + γ=0.995. Retrained A and D.
+
+| | α p50 | φ p50 | CBF acts | crash (corridor) |
+| --- | --- | --- | --- | --- |
+| Arch A | 5.00 | 0.01 | 18.1% | 8.0% |
+| Arch D | 5.00 | 0.01 | 28.1% | 7.6% |
+
+Both archs drifted α back to 5.0. φ stayed pegged at 0.01. Crashes improved a bit (8/7.6% vs ISSf-1.0's 6.4%), but the failure mode is identical to where we started — corner attractor wins again.
+
+## 24. Real culprit — init_std=1.0 scatters the policy across the full action range every step
+
+The rsl_rl Gaussian distribution defaults to `init_std=1.0` in normalized action space [-1, 1]. With std=1.0, the policy's exploration noise covers the entire action range every step:
+
+- Anchor at α=2 (norm=−0.224). Exploration ±1σ → norm ∈ [−1.224, 0.776] → after clamping, α ∈ [0.1, 4.4] every step
+- Anchor at φ=1.0 (norm=−0.802). Exploration ±1σ → norm ∈ [−1.802, 0.198] → φ ∈ [0.01, 6.0]
+
+So the anchor init is *immediately undone* by exploration noise. The very first batch of PPO samples lands all over the action space — including corners. PPO computes the gradient from this noisy batch, finds the corner has higher reward, and pulls the policy there. The anchor never gets a chance to hold.
+
+## 25. Current test — init_std 1.0 → 0.1
+
+One-line change in `cbf_go2/rsl_rl_cfg.py`: `GaussianDistributionCfg(init_std=0.1, std_type="scalar")`.
+
+With std=0.1:
+
+- Anchor at α=2.0: ±1σ → α ∈ [1.65, 2.35] — local exploration only
+- Anchor at φ=1.0: ±1σ → φ ∈ [0.6, 1.4] — local exploration only
+
+PPO should now refine the anchor locally instead of being pulled to corners. If (α=2, φ=1.0) is genuinely the global optimum (sweep says yes), PPO should converge there. Retraining A and D.
+
+Expected outcomes:
+
+- **α stays ~2, φ stays ~1.0**: anchor + local exploration enough. RL matches ISSf-1.0 fixed performance. The remaining question becomes: can it learn per-scene modulation that *beats* fixed ISSf-1.0?
+- **Policy drifts even with tiny exploration**: gradient itself favors corners from anywhere in the space. Then ISSf is the practical operating point and the "learned (α, φ)" framing is fundamentally limited under this reward + DR + lidar-CBF stack.

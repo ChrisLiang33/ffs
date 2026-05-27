@@ -25,7 +25,7 @@ _PPO = RslRlPpoAlgorithmCfg(
 
 
 def _gaussian():
-    return RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0, std_type="scalar")
+    return RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.1, std_type="scalar")
 
 
 def _actor_kwargs(class_name: str):

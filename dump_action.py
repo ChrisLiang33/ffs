@@ -53,11 +53,15 @@ def main(env_cfg, agent_cfg):
 
     obs = env.get_observations()
     samples = []
+    intervened = []  # per-step bool tensor of "did CBF actually project?"
+    action_term = env.unwrapped.action_manager.get_term("cbf_params")
     for _ in range(args.steps):
         with torch.inference_mode():
             action = policy(obs)
             samples.append(action.detach().clone().cpu())
             obs, _, _, _ = env.step(action)
+            if hasattr(action_term, "_last_intervened"):
+                intervened.append(action_term._last_intervened.detach().clone().cpu())
 
     all_acts = torch.cat(samples, dim=0).clamp(-1.0, 1.0)
     alpha = (all_acts[:, 0] + 1.0) / 2.0 * (5.0 - 0.1) + 0.1   # range (0.1, 5.0)
@@ -72,6 +76,10 @@ def main(env_cfg, agent_cfg):
           f"pcts(5/25/50/75/95)= {a_p[0]:.2f} {a_p[1]:.2f} {a_p[2]:.2f} {a_p[3]:.2f} {a_p[4]:.2f}")
     print(f"  phi:   mean={phi.mean():.2f}  std={phi.std():.2f}  "
           f"pcts(5/25/50/75/95)= {p_p[0]:.2f} {p_p[1]:.2f} {p_p[2]:.2f} {p_p[3]:.2f} {p_p[4]:.2f}")
+    if intervened:
+        inter = torch.cat(intervened).float()
+        print(f"  cbf intervention rate: {inter.mean().item():.1%}   "
+              f"(fraction of steps the safety filter actually projected u_nom -> u_safe)")
     print()
 
     env.close()

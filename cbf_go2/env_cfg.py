@@ -110,7 +110,7 @@ class ObservationsCfg:
 class RewardsCfg:
     progress = RewTerm(
         func=cbf_mdp.velocity_to_goal,
-        weight=1.0,
+        weight=0.2,
         params={"command_name": "goal_pose"},
     )
     goal_bonus = RewTerm(

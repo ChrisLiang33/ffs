@@ -29,6 +29,7 @@ class CBFParamsAction(ActionTerm):
         self._raw_actions = torch.zeros((self.num_envs, 2), device=self.device)
         self._prev_raw_actions = torch.zeros_like(self._raw_actions)
         self._obstacle_names = cfg.obstacle_names
+        self._last_intervened = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
 
     @property
     def action_dim(self) -> int:
@@ -90,6 +91,11 @@ class CBFParamsAction(ActionTerm):
             gamma=self.cfg.gamma,
         )
         u_safe = torch.nan_to_num(u_safe, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
+
+        # CBF intervention indicator: did the safety filter actually modify u_nom?
+        # bool per env; the eval can aggregate the running mean.
+        delta = (u_safe[:, :2] - u_nom[:, :2]).abs().max(dim=-1).values
+        self._last_intervened = (delta > 1e-4)
 
         self._inner._raw_actions[:] = u_safe
         self._inner.apply_actions()

@@ -104,6 +104,8 @@ def main(env_cfg, agent_cfg):
     ep_steps = torch.zeros(args.num_envs, device=device, dtype=torch.long)
     episodes: list[tuple[str, int]] = []  # (outcome, length)
     action_samples: list[torch.Tensor] = []  # collect raw (norm) actions for RL only
+    intervened: list[torch.Tensor] = []     # per-step bool, "did CBF actually project?"
+    action_term = env.unwrapped.action_manager.get_term("cbf_params")
 
     for _ in range(args.steps):
         # Re-apply each step so post-reset randomization gets overridden back to the scene.
@@ -124,6 +126,8 @@ def main(env_cfg, agent_cfg):
             else:
                 action = fixed
             obs, _, dones, _ = env.step(action)
+            if hasattr(action_term, "_last_intervened"):
+                intervened.append(action_term._last_intervened.detach().clone().cpu())
         ep_steps += 1
         reached_mask = term_mgr.get_term("goal_reached")
         crashed_mask = term_mgr.get_term("base_contact") | term_mgr.get_term("obstacle_hit")
@@ -158,6 +162,10 @@ def main(env_cfg, agent_cfg):
     if reach_lengths:
         mean_len = sum(reach_lengths) / len(reach_lengths)
         print(f"  mean steps to reach: {mean_len:.1f}   ({mean_len * 0.02:.2f} sec)")
+    if intervened:
+        inter = torch.cat(intervened).float()
+        print(f"  cbf intervention rate: {inter.mean().item():.1%}   "
+              f"(fraction of steps the safety filter actually projected u_nom -> u_safe)")
 
     # Action distribution (RL only): show what (alpha, phi) the policy actually picked.
     action_stats = None

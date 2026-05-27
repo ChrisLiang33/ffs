@@ -22,10 +22,10 @@ POLICY_DIM = PROPRIO_DIM + BEV_DIM    # 783
 PRIV_DIM = 4
 Z_DIM = 16
 
-# ISSf anchor in normalized action space.
-# alpha=2.0 in [0.1, 5.0] -> 2*(2.0-0.1)/(5.0-0.1) - 1 = -0.224
-# phi=0.5   in [0.01, 10.0] -> 2*(0.5-0.01)/(10.0-0.01) - 1 = -0.902
-_ANCHOR_NORM = (-0.224, -0.902)
+# ISSf anchor in normalized action space — sweep optimum is (alpha=2, phi=1.0).
+# alpha=2.0 in [0.1, 5.0]  -> 2*(2.0-0.1)/(5.0-0.1) - 1 = -0.224
+# phi=1.0   in [0.01, 10.0] -> 2*(1.0-0.01)/(10.0-0.01) - 1 = -0.802
+_ANCHOR_NORM = (-0.224, -0.802)
 
 
 def _init_head_at_anchor(encoder: nn.Module) -> None:
