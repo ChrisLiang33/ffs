@@ -432,3 +432,79 @@ Expected outcomes:
 
 - **α stays ~2, φ stays ~1.0**: anchor + local exploration enough. RL matches ISSf-1.0 fixed performance. The remaining question becomes: can it learn per-scene modulation that *beats* fixed ISSf-1.0?
 - **Policy drifts even with tiny exploration**: gradient itself favors corners from anywhere in the space. Then ISSf is the practical operating point and the "learned (α, φ)" framing is fundamentally limited under this reward + DR + lidar-CBF stack.
+
+## 26. init_std=0.1 — corner attractor broken, Arch D now competitive
+
+Stack: anchor (α=2, φ=1.0) + **init_std=0.1** + progress=0.2 + crash=−200 + γ=0.995. Retrained A and D, 200 iters.
+
+Corridor action distributions:
+
+| | α median | α IQR | φ mean | CBF acts | crash |
+| --- | --- | --- | --- | --- | --- |
+| Arch A | **3.91** | [2.67, 4.98] | 0.53 | 22.6% | 7.6% |
+| Arch D | **3.20** | [1.72, 4.48] | 1.20 | 30.3% | 9.6% |
+| ISSf-1.0 (ref) | 2.0 | — | 1.0 | 54.3% | 6.4% |
+
+**The corner attractor is broken.** Both archs are now in distributed action regimes (IQRs spanning the middle of the action range), not pegged at extremes. φ means are 0.53 and 1.20 (vs the 0.01 they had under the corner attractor).
+
+But neither lands exactly at the anchor — gradient still pulls α somewhat upward. The fundamental tradeoff is exposed: small `init_std` → anchor holds but policy can't learn modulation; large `init_std` → exploration → corner attractor. We're in between.
+
+Full 7-scene eval (Arch D 200iter pooled across 2 seeds):
+
+| scene | Arch D | ISSf-1.0 | winner |
+| --- | --- | --- | --- |
+| in_dist | 90.5/9.2 | **93.8/5.5** | ISSf |
+| open | 95.9/4.1 | **96.5/3.5** | ISSf (tiny) |
+| sparse | **95.5/4.3** | 95.0/4.6 | **Arch D** |
+| corridor | 91.2/8.2 | **93.9/4.6** | ISSf |
+| slalom | 93.1/6.3 | **93.9/4.7** | ISSf |
+| narrow | **95.5/4.1** | 95.1/4.4 | **Arch D** |
+| gauntlet | 94.2/5.2 | **94.3/4.9** | ~tied |
+
+**Arch D wins outright on sparse and narrow; ties gauntlet.** Loses on in_dist, corridor, slalom (the harder/more random scenes) by 2-4 points. Arch A is uniformly behind Arch D — priv obs doesn't help, possibly hurts.
+
+## 27. Arch D 400 iter — more training doesn't help, intervention drops
+
+Trained Arch D for 400 iters (double what we'd been using) to test if more training closes the gap.
+
+| scene | Arch D 200 | Arch D 400 | ISSf-1.0 | Δ (D400 − ISSf) |
+| --- | --- | --- | --- | --- |
+| in_dist | 90.5/9.2 | 91.1/8.6 | **93.8/5.5** | −2.7 / +3.1 |
+| open | 95.9/4.1 | 95.9/4.1 | **96.5/3.5** | −0.6 / +0.6 |
+| sparse | 95.5/4.3 | **96.1/3.7** | 95.0/4.6 | +1.1 / −0.9 |
+| corridor | 91.2/8.2 | 91.9/7.4 | **93.9/4.6** | −2.0 / +2.8 |
+| slalom | 93.1/6.3 | 92.9/6.5 | **93.9/4.7** | −1.0 / +1.8 |
+| narrow | 95.5/4.1 | **95.4/4.4** | 95.1/4.4 | +0.3 / 0 |
+| gauntlet | 94.2/5.2 | 93.6/5.9 | **94.3/4.9** | −0.7 / +1.0 |
+
+Small improvements on a few scenes, slight regressions on others. **No closing of the gap on the hard scenes.**
+
+And the CBF intervention rates fell across the board as training went longer:
+
+| scene | D 200 intervention | D 400 intervention |
+| --- | --- | --- |
+| in_dist | 32.6% | 23.5% |
+| corridor | 36.4% | 27.3% |
+| slalom | 36.0% | 26.5% |
+| gauntlet | 29.4% | 19.5% |
+
+**Intervention rate dropped 25-35% with more training**, which means α drifted *up* over the extra iters. PPO is still climbing the corner-attractor gradient, just slowly. Local exploration delays the climb but doesn't stop it.
+
+## 28. Conclusion of the day's work
+
+We have a clean, defensible characterization of this regime:
+
+1. **The corner attractor (α=5, φ=0.01) is a PPO-fundamental failure mode** under this reward + action parameterization. High α makes the CBF effectively off, which means φ has no learning signal, which means PPO drifts to the corner.
+2. **The diagnosis chain is solid**: progress reward → high α preferred → CBF off (intervention drops 11.7%) → φ ungrounded → corner attractor. Verified directly with CBF intervention rate measurement.
+3. **The corner attractor can be broken with init_std=0.1 + ISSf anchor**, but the underlying gradient still pulls α upward over training. More iters → policy drifts back toward corner gradually.
+4. **In the current regime, RL with PPO approaches but doesn't beat a well-tuned fixed ISSf-(α=2, φ=1.0)**. RL matches/wins on sparse, narrow, gauntlet; loses by 1-3 points on in_dist, corridor, slalom.
+5. **A single fixed (α, φ) is the practical choice in this deployment-realistic regime.** Per-scene adaptation has minimal upside (ISSf φ-sweep shows φ=1.0 dominates everywhere).
+
+This isn't the "learned > fixed" story we hoped for, but it's a clean negative result with a complete mechanistic understanding. The pipeline regression in Section 17 (going from GT obs/GT CBF to lidar BEV + DR + grid CBF) made ISSf *more* attractive because it's robust by construction, while RL needs precision the new pipeline doesn't provide. **The deployment-realistic stack favors fixed conservative parameters over learned ones.**
+
+### Open paths if we want to push further
+
+- **Behavior clone from ISSf, then PPO fine-tune**: pretrain to imitate (α=2, φ=1.0), let PPO refine. Sidesteps the corner-attractor exploration issue. Could potentially get small per-scene improvements over fixed.
+- **Constrained MDP (CPO)**: treat crash as a hard constraint rather than a reward term. Removes the "trade safety for progress" gradient that pulls α up.
+- **Progress reward → 0 (sparse reward only)**: removes the gradient pulling α up. Risk: PPO may not learn at all.
+- **Accept this as the finding** and write the paper around "learned ≈ fixed in deployment-realistic regimes, with a precise mechanism for why."
