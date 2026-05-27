@@ -1,0 +1,17 @@
+--- git commit ---
+a859a5f9d29c3afcfe05f77735e3aaf167c0894e
+
+
+--- git status ---
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	phase0_5_log.csv
+	phase0_log.csv
+
+nothing added to commit but untracked files present (use "git add" to track) 
+
+
+--- git diff ---
