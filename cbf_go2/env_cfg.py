@@ -20,6 +20,7 @@ from isaaclab.utils import configclass
 from isaaclab_tasks.manager_based.locomotion.velocity.config.go2.flat_env_cfg import UnitreeGo2FlatEnvCfg
 
 from . import mdp as cbf_mdp
+from .cbf_params_action import CBFParamsActionCfg
 
 LOW_LEVEL_ENV_CFG = UnitreeGo2FlatEnvCfg()
 POLICY_CHECKPOINT = (
@@ -49,12 +50,19 @@ class CommandsCfg:
 
 @configclass
 class ActionsCfg:
-    velocity_cmd: nav_mdp.PreTrainedPolicyActionCfg = nav_mdp.PreTrainedPolicyActionCfg(
+    cbf_params: CBFParamsActionCfg = CBFParamsActionCfg(
         asset_name="robot",
-        policy_path=POLICY_CHECKPOINT,
-        low_level_decimation=4,
-        low_level_actions=LOW_LEVEL_ENV_CFG.actions.joint_pos,
-        low_level_observations=LOW_LEVEL_ENV_CFG.observations.policy,
+        inner_cfg=nav_mdp.PreTrainedPolicyActionCfg(
+            asset_name="robot",
+            policy_path=POLICY_CHECKPOINT,
+            low_level_decimation=4,
+            low_level_actions=LOW_LEVEL_ENV_CFG.actions.joint_pos,
+            low_level_observations=LOW_LEVEL_ENV_CFG.observations.policy,
+        ),
+        obstacle_names=OBSTACLE_NAMES,
+        obstacle_radius=OBSTACLE_RADIUS,
+        robot_radius=0.3,
+        command_name="goal_pose",
     )
 
 
