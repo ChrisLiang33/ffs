@@ -77,15 +77,33 @@ class ObservationsCfg:
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
         goal = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
         actions = ObsTerm(func=cbf_mdp.last_action_clamped)
-        obstacles = ObsTerm(
-            func=cbf_mdp.obstacles_body_frame,
-            params={"obstacle_names": OBSTACLE_NAMES},
+        bev = ObsTerm(
+            func=cbf_mdp.bev_occupancy,
+            params={
+                "obstacle_names": OBSTACLE_NAMES,
+                "obstacle_radius": OBSTACLE_RADIUS,
+                "grid_size": 16,
+                "grid_extent": 3.0,
+                "dropout": 0.0,
+                "noise_std": 0.0,
+            },
+            history_length=3,
         )
 
         def __post_init__(self):
             self.concatenate_terms = True
 
+    @configclass
+    class PrivCfg(ObsGroup):
+        """Privileged DR values — only the Arch A teacher sees these."""
+
+        dr_values = ObsTerm(func=cbf_mdp.priv_dr_values)
+
+        def __post_init__(self):
+            self.concatenate_terms = True
+
     policy: PolicyCfg = PolicyCfg()
+    priv: PrivCfg = PrivCfg()
 
 
 @configclass
@@ -122,7 +140,7 @@ class TerminationsCfg:
     )
     obstacle_hit = DoneTerm(
         func=cbf_mdp.in_collision,
-        params={"obstacle_names": OBSTACLE_NAMES, "margin": COLLISION_MARGIN},
+        params={"obstacle_names": OBSTACLE_NAMES, "extra_margin": 0.15},
     )
 
 
@@ -182,6 +200,52 @@ class GoalGo2EnvCfg(ManagerBasedRLEnvCfg):
             params={
                 "obstacle_names": OBSTACLE_NAMES,
                 "range_xy": 2.5,
-                "min_dist_from_origin": 1.3,
+                "min_dist_from_origin": 1.5,  # bumped slightly to accommodate max radius 0.6
             },
         )
+
+        # full uncertainty DR: friction + mass per-reset, aggressive pushes
+        self.events.physics_material = EventTerm(
+            func=mdp.randomize_rigid_body_material,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+                "static_friction_range": (0.3, 1.2),
+                "dynamic_friction_range": (0.2, 1.0),
+                "restitution_range": (0.0, 0.1),
+                "num_buckets": 64,
+            },
+        )
+        self.events.add_base_mass = EventTerm(
+            func=mdp.randomize_rigid_body_mass,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="base"),
+                "mass_distribution_params": (-3.0, 8.0),
+                "operation": "add",
+            },
+        )
+        self.events.push_robot = EventTerm(
+            func=mdp.push_by_setting_velocity,
+            mode="interval",
+            interval_range_s=(3.0, 5.0),
+            params={"velocity_range": {"x": (-1.0, 1.0), "y": (-1.0, 1.0)}},
+        )
+
+        # lidar noise/dropout on the BEV (sim-to-real channel)
+        self.observations.policy.bev.params["dropout"] = 0.1
+        self.observations.policy.bev.params["noise_std"] = 0.05
+
+
+# ---------- Arch D env variant: long proprio+action history ----------
+
+@configclass
+class GoalGo2EnvCfgArchD(GoalGo2EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        # Replace each term with a fresh ObsTerm carrying history_length=50, so we don't
+        # mutate the parent class's shared default (would cross-contaminate other env_cfgs).
+        self.observations.policy.base_lin_vel = ObsTerm(func=mdp.base_lin_vel, history_length=50)
+        self.observations.policy.base_ang_vel = ObsTerm(func=mdp.base_ang_vel, history_length=50)
+        self.observations.policy.projected_gravity = ObsTerm(func=mdp.projected_gravity, history_length=50)
+        self.observations.policy.actions = ObsTerm(func=cbf_mdp.last_action_clamped, history_length=50)

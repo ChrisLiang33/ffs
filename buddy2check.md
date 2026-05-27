@@ -117,8 +117,87 @@ The earlier "RL beats ISSf 80 vs 76 with 13% crash" was an artefact of `min_dist
 - **Action space normalization.** Policy outputs Gaussian samples; needed to (a) clamp at the action term, (b) make `action_rate` read the clamped version, (c) make `last_action` observation read the clamped version. Otherwise the policy sees its own ±5 outputs as observations and self-feedback diverges.
 - **CBF defensive math.** `compute_h` exp arg clamped at 5 (was blowing up when sdf << 0), `safety_filter` output wrapped in `nan_to_num` + `clamp(-1, 1)` to avoid OOD velocity commands to the locomotion.
 
+## 7. Uncertainty DR — friction, mass, pushes, lidar noise
+
+Added the *other* DR axis so RL's react-to-realized-uncertainty edge can show up:
+
+- **Friction** per-reset: static ∈ [0.3, 1.2], dynamic ∈ [0.2, 1.0], 64 buckets.
+- **Base mass** per-reset: +U(-3, 8) kg added to base body.
+- **Pushes** every 3–5 s: vx, vy ∈ U(-1, 1) m/s applied to base.
+- **BEV noise + dropout**: noise_std=0.05, dropout=0.1 per cell — simulates lidar dropouts on real Mid-360.
+
+These all go through `events` (per-reset or interval) in [cbf_go2/env_cfg.py](cbf_go2/env_cfg.py).
+
+## 8. Deployment-realistic safety stack — lidar-driven h(x)
+
+Dropped GT obstacle positions from the safety layer. The CBF now reads from the same BEV grid the policy sees:
+
+- **SDT at body-frame center**: `sdf = min_dist(0, 0) over occupied cells - robot_radius`. ([cbf_go2/cbf.py](cbf_go2/cbf.py) `sdf_from_grid`)
+- **Body-frame gradient** (no world↔body rotation needed since BEV is already body-frame).
+- **Dropped L_f h** — no obstacle velocity estimate from a single BEV frame anyway. Pure h-constraint: `A·u + α·h - φ·||A||² ≥ 0`.
+- New action term path: `safety_filter_grid` in [cbf_go2/cbf_params_action.py](cbf_go2/cbf_params_action.py). At deploy, this would point at the Mid-360 occupancy grid directly.
+
+Crashes don't change meaningfully — the lidar BEV is high enough resolution (16×16, 3m extent) that SDT≈true-SDF.
+
+## 9. Four architectures — ablations
+
+Setting up an A/B/C/D comparison so we can isolate what matters in the encoder:
+
+| arch | task ID | proprio | bev | priv | history |
+| --- | --- | --- | --- | --- | --- |
+| **A** Teacher | `Isaac-Goal-Go2-v0` | 15-dim MLP | 3-frame CNN | 4-dim (friction, mass, body_h) | 3 |
+| **B** Student | `Isaac-Goal-Go2-StudentB-v0` | 15-dim MLP | 3-frame CNN | — | 3 |
+| **C** Flat | `Isaac-Goal-Go2-FlatC-v0` | flat MLP over concat | (no CNN) | — | 3 |
+| **D** LongHist | `Isaac-Goal-Go2-LongHistD-v0` | 50-step MLP | 3-frame CNN | — | 50 proprio |
+
+Custom rsl_rl actor classes in [cbf_go2/cnn_actor.py](cbf_go2/cnn_actor.py). Priv obs (friction, mass delta, body height) is a separate `priv` obs group, only consumed by Arch A's encoder. Ablations answer:
+
+- **A vs B**: does privileged DR (oracle friction/mass) help? → upper-bound on what an RMA-style adapter could distill.
+- **C vs B**: does the CNN buy anything over flat MLP on BEV?
+- **B vs D**: does long proprio history substitute for priv (RMA-style implicit adaptation)?
+
+## 10. Scene suite — 7 layouts for generalization
+
+[cbf_go2/scenes.py](cbf_go2/scenes.py) defines fixed obstacle layouts so we can stress-test the same checkpoint across distributions:
+
+| scene | layout |
+| --- | --- |
+| `in_dist` | the env's own random per-reset layout (training distribution) |
+| `open` | no obstacles |
+| `sparse` | 2 obstacles at ±2m |
+| `corridor` | 4 corners |
+| `slalom` | zig-zag |
+| `narrow` | gate at x=2 (gap 0.4m) |
+| `gauntlet` | dense cluster at x∈[1.5, 2.5] |
+
+[eval_cbf.py](eval_cbf.py) gained `--scene <name>` and `--eval_seed <int>` flags. `apply_scene` is wrapped in `torch.inference_mode()` because `write_root_pose_to_sim` mutates inference tensors.
+
+## 11. Overnight pipeline — one script, all numbers
+
+[overnight.sh](overnight.sh) chains the whole thing:
+
+1. Train each of 4 archs (400 PPO iters, 4096 envs each).
+2. Eval each RL checkpoint × 7 scenes × 2 seeds.
+3. ISSf sweep: 4 φ values × 7 scenes × 2 seeds.
+4. TISSf sweep: 4 (ε₀, λ) configs × 7 scenes × 2 seeds.
+5. [aggregate.py](aggregate.py): collapse seeds, Wilson 95% CIs, write `overnight_summary.{json,csv}`.
+6. [plot.py](plot.py): per-scene bar charts + Pareto scatter into `overnight_plots/`.
+
+Per-step failures captured in `overnight_logs/`, don't abort the whole run. ETA ~5 hrs on the lab RTX 5090.
+
+## Things to push back on (current pass)
+
+- **Priv obs is only 4-dim** (friction × 2, mass delta, body height). Anything recoverable from BEV (obstacle radii, drift velocities) is *not* priv — would leak the scene to the teacher. That's the bar for what counts as priv here.
+- **Single 95% CI** treats episodes as iid. We bin per-(method, scene), pool seeds, then Wilson on the pooled count. If reviewers ask, we can also report between-seed std.
+- **Episode length 10 s during training, used same in eval.** Long enough for furthest goal at ~4.2m at 0.7 m/s ≈ 6 s. Timeouts in eval mostly = "got stuck circling an obstacle" not "out of time."
+- **No RMA distillation yet.** Arch A vs B tells us the priv upper bound; if A wins meaningfully, the next step is to distill A → student with proprio history (like Arch D's encoder but supervised from A's adapter output). Not in this pass.
+
 ## Next
 
-- **Uncertainty DR** (friction, payload, motor strength, push intensity). This is the *other* DR axis — should widen RL's crash edge specifically, since ISSf has to be worst-case for all DR samples while RL can react to the realized one.
-- **Fix the spawn-collision issue** in randomization (event order or reject-sample) so the 15% structural-crash floor goes away and we can see safety differences cleanly.
-- **Multiple seeds** before committing to paper numbers.
+- Read morning results: `overnight_summary.csv`, `overnight_plots/`. Key questions:
+  - A vs B: does priv help? By how much?
+  - C vs B: CNN vs flat?
+  - B vs D: history vs priv?
+  - Does any RL arch beat ISSf+TISSf on the *hardest* scene (`narrow`, `gauntlet`)?
+- If A wins clearly → distill RMA-style adapter (proprio history → priv embedding).
+- If everything ties on `in_dist` but RL pulls ahead on `narrow`/`gauntlet` → that's the OOD generalization story.

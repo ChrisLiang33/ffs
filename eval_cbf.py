@@ -26,6 +26,10 @@ parser.add_argument("--save", default=None, help="Optional path to dump per-epis
 parser.add_argument("--checkpoint", default=None)
 parser.add_argument("--agent", default="rsl_rl_cfg_entry_point")
 parser.add_argument("--episode_length_s", type=float, default=30.0)
+parser.add_argument("--scene", default="in_dist",
+                    help="static layout name (in_dist|open|sparse|corridor|slalom|narrow|gauntlet)")
+parser.add_argument("--eval_seed", type=int, default=None,
+                    help="seed for the env (separate from --seed which is rsl_rl's seed)")
 AppLauncher.add_app_launcher_args(parser)
 args, hydra_args = parser.parse_known_args()
 args.headless = True
@@ -40,6 +44,7 @@ import torch
 from rsl_rl.runners import OnPolicyRunner
 
 import cbf_go2  # noqa: F401
+from cbf_go2.scenes import apply_scene
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -65,6 +70,9 @@ def to_norm(v: float, lo: float, hi: float) -> float:
 def main(env_cfg, agent_cfg):
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.episode_length_s = args.episode_length_s
+    if args.eval_seed is not None:
+        env_cfg.seed = args.eval_seed
+        agent_cfg.seed = args.eval_seed
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, rsl_rl_version)
 
     env = gym.make(args.task, cfg=env_cfg)
@@ -89,12 +97,16 @@ def main(env_cfg, agent_cfg):
         mode_str = f"ISSf (alpha={args.alpha}, phi={args.phi})"
 
     term_mgr = env.unwrapped.termination_manager
+    # Apply the static scene layout once before stepping so all envs see it from t=0.
+    apply_scene(env.unwrapped, args.scene)
     obs = env.get_observations()
 
     ep_steps = torch.zeros(args.num_envs, device=device, dtype=torch.long)
     episodes: list[tuple[str, int]] = []  # (outcome, length)
 
     for _ in range(args.steps):
+        # Re-apply each step so post-reset randomization gets overridden back to the scene.
+        apply_scene(env.unwrapped, args.scene)
         with torch.inference_mode():
             if args.mode == "rl":
                 action = policy(obs)

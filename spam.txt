@@ -1,0 +1,49 @@
+Setup: robot at p, closest obstacle at ρ, both 2D, world frame. Define n̂ = (p − ρ) / ||p − ρ|| — unit vector from obstacle to robot.
+
+Concrete example: robot at (0, 0), obstacle at (3, 0). Then e = p − ρ = (−3, 0), so n̂ = (−1, 0) — points west, away from the obstacle, toward the robot.
+
+Gradients of h = λ(1 − exp(−γ·sdf)):
+
+Let β = λγ·exp(−γ·sdf) (positive scalar).
+
+∂h/∂p = β · n̂
+∂h/∂ρ = −β · n̂ (chain rule flips sign since sdf depends on −ρ via the distance)
+Total ḣ:
+
+
+ḣ = (β·n̂) · R(θ)·u_xy  +  (−β·n̂) · v
+  └── L_g h · u ──────┘   └── L_f h ──┘
+So:
+
+
+L_f h = −β · (n̂ · v)
+Sign check with the example:
+
+Obstacle at (3, 0) moves west (toward the robot) at speed 1: v = (−1, 0).
+
+n̂ · v = (−1)·(−1) + 0 = +1
+L_f h = −β · (+1) = −β < 0
+h autonomously decreases ✓ (obstacle is approaching, distance shrinks, h shrinks)
+Obstacle moves east (away): v = (+1, 0).
+
+n̂ · v = (−1)·(+1) = −1
+L_f h = −β · (−1) = +β > 0
+h autonomously increases ✓ (obstacle retreats, distance grows)
+Constraint:
+
+
+ḣ + α·h − φ·||L_g h||² ≥ 0
+L_f h + A·u_xy + α·h − φ·||A||² ≥ 0
+Solve for u_xy half-space:
+
+
+A · u_xy ≥ φ·||A||² − α·h − L_f h
+So in code:
+
+
+rhs = phi * A_norm_sq - alpha * h - L_f_h
+Sign of −L_f h in the rhs:
+
+Obstacle approaching → L_f h < 0 → −L_f h > 0 → rhs larger → constraint harder → robot pushes back more ✓
+Obstacle retreating → L_f h > 0 → −L_f h < 0 → rhs smaller → constraint easier ✓
+Confirmed. The earlier post had the right final formula; this version just walks through with concrete numbers so the sign is unambiguous.

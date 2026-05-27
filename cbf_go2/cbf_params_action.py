@@ -57,6 +57,11 @@ class CBFParamsAction(ActionTerm):
         return self._prev_raw_actions
 
     def apply_actions(self):
+        from . import mdp as _cbf_mdp
+
+        # advance kinematic drifting obstacles by their velocity each sub-step
+        _cbf_mdp.advance_obstacles(self._env, self._obstacle_names, dt=self._env.physics_dt)
+
         # u_nom: unit vector toward goal in body frame
         goal_cmd = self._env.command_manager.get_term(self.cfg.command_name)
         goal_xy_b = goal_cmd.pos_command_b[:, :2]
@@ -64,32 +69,28 @@ class CBFParamsAction(ActionTerm):
         u_nom = torch.zeros((self.num_envs, 3), device=self.device)
         u_nom[:, :2] = goal_xy_b / dist
 
-        # CBF projection
+        # CBF projection via grid-derived sdf (deployment-realistic: only uses lidar BEV)
         params = self.processed_actions
-        quat = self.robot.data.root_quat_w
-        yaw = torch.atan2(
-            2 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
-            1 - 2 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
-        )
-        obs_xy = torch.stack(
-            [self._env.scene[name].data.root_pos_w[:, :2] for name in self._obstacle_names], dim=1
-        )
-        u_safe = cbf.safety_filter(
-            u_nom=u_nom,
-            robot_xy=self.robot.data.root_pos_w[:, :2],
-            robot_yaw=yaw,
-            obs_xy=obs_xy,
+        grid_flat = _cbf_mdp.bev_occupancy(
+            self._env,
+            obstacle_names=self._obstacle_names,
             obstacle_radius=self.cfg.obstacle_radius,
+            grid_size=self.cfg.grid_size,
+            grid_extent=self.cfg.grid_extent,
+        )
+        grid = grid_flat.reshape(self.num_envs, self.cfg.grid_size, self.cfg.grid_size)
+        u_safe = cbf.safety_filter_grid(
+            u_nom=u_nom,
+            grid=grid,
+            grid_extent=self.cfg.grid_extent,
             robot_radius=self.cfg.robot_radius,
             alpha=params[:, 0],
             phi=params[:, 1],
             lam=self.cfg.lam,
             gamma=self.cfg.gamma,
         )
-        # belt-and-suspenders: NaN guard + clamp to locomotion training range
         u_safe = torch.nan_to_num(u_safe, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
 
-        # hand u_safe to the frozen-locomotion inner term, then drive it
         self._inner._raw_actions[:] = u_safe
         self._inner.apply_actions()
 
@@ -113,3 +114,5 @@ class CBFParamsActionCfg(ActionTermCfg):
     phi_range: tuple = (0.01, 10.0)
     lam: float = 1.0
     gamma: float = 1.0
+    grid_size: int = 16
+    grid_extent: float = 3.0
