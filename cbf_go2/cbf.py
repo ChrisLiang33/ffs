@@ -105,13 +105,28 @@ def safety_filter_grid(
     phi,
     lam: float = 1.0,
     gamma: float = 1.0,
+    closest_obs_velocity_body: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Lidar-grid CBF: sdf from BEV directly, no obstacle positions needed. No L_f h."""
+    """Lidar-grid CBF with optional velocity-aware L_f h.
+
+    If `closest_obs_velocity_body` is None, this reduces to the static CBF (no L_f h).
+    If provided ((N, 2) tensor in body frame), L_f h = -dh/dsdf * (sdf_grad . v_closest)
+    is added to the constraint so the filter anticipates obstacle motion. For a closing
+    obstacle (v_obs aligned with sdf_grad), L_f h is negative -> RHS gets larger ->
+    constraint demands more outward motion.
+    """
     sdf, sdf_grad_body = sdf_from_grid(grid, grid_extent, robot_radius)
     h, h_grad_body = compute_h(sdf, sdf_grad_body, lam=lam, gamma=gamma)
     A = h_grad_body  # body-frame already
     A_norm_sq = (A * A).sum(dim=-1).clamp_min(1e-12)
-    rhs = phi * A_norm_sq - alpha * h
+
+    if closest_obs_velocity_body is not None:
+        dh_dsdf = (lam * gamma) * torch.exp((-gamma * sdf).clamp(max=5.0))
+        L_f_h = -dh_dsdf * (sdf_grad_body * closest_obs_velocity_body).sum(dim=-1)
+    else:
+        L_f_h = torch.zeros_like(sdf)
+
+    rhs = phi * A_norm_sq - alpha * h - L_f_h
     u_xy = u_nom[..., :2]
     violation = (rhs - (A * u_xy).sum(dim=-1)).clamp_min(0.0)
     u_xy_safe = u_xy + (violation / A_norm_sq).unsqueeze(-1) * A

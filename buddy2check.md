@@ -600,3 +600,179 @@ Current execution plan:
 - `eval_cbf.py` + `proprio_compare.py`: pass `force_init_positions=True` on first step.
 
 Next training run is on the new env; eval will include `crossing` alongside the static scene suite.
+
+## 32. Hard-env retrain — RL still doesn't beat ISSf, gap collapsed
+
+Trained two versions on the hard env (6s episodes, goal range (-2,2)², min_dist 0.8, drift 1.0-2.5 m/s):
+
+- **v1**: hard env, action_rate=−0.05 (original), no EMA
+- **v2**: hard env, action_rate=−0.3, EMA decay=0.7 on action
+
+Both trained 400 iters with anchor (α=2, φ=1.0), init_std=0.1, progress=0, crash=−200, γ=0.995.
+
+Results on 3 representative scenes (one static, two moving):
+
+| scene | RL v1 | RL v2 | ISSf-φ=1.0 | TISSf |
+| --- | --- | --- | --- | --- |
+| corridor | 86.9 / 8.5 | 87.1 / 6.6 | 88.1 / **4.2** | 89.1 / **4.1** |
+| crossing | 79.6 / 20.4 | 79.9 / 20.1 | 80.5 / 19.5 | 79.8 / 20.2 |
+| head_on | 81.6 / 18.3 | 80.5 / 19.5 | **82.6 / 17.4** | 81.7 / 18.2 |
+
+Three honest observations:
+
+- **ISSf wins or ties everywhere.** Hard env didn't expose RL's edge.
+- **The crossing win is gone.** In the medium env, RL beat ISSf 92.4/7.6 vs 90.2/9.8 (a clear +2.2/−2.2). In the hard env, both at ~80/20 — same floor. Harder env collapsed the gap by hurting all methods equally.
+- **Smoothing (v2 vs v1) is a wash.** Statistically identical on crossing/head_on; v2 slightly fewer crashes on corridor but at the cost of more timeouts. EMA didn't change the policy's strategy.
+
+The hard env was supposed to widen the gap. Instead it compressed it. ISSf's "be conservative" is robust to any added difficulty because it doesn't depend on the policy reading anything.
+
+## 33. Adaptation diagnostic — policy adapts, but in the wrong direction
+
+Wrote `verify_adapt.py` to run a checkpoint on a chosen scene and bin per-step `(α, φ)` by (a) distance-to-nearest-obstacle and (b) approach velocity (positive = obstacle closing on robot). Hypothesis: if the policy is reading lidar properly, we expect α to DROP and φ to RISE as obstacles get closer or charge harder.
+
+What we actually see (v1 on head_on, 100k samples):
+
+**Distance-conditional (near vs far obstacle):**
+
+| bin | distance | α | φ |
+| --- | --- | --- | --- |
+| **near** (0.90 m) | | **3.03** | **1.93** |
+| mid (1.40 m) | | 2.46 | 2.72 |
+| far (2.31 m) | | 2.42 | 3.34 |
+
+**Approach-velocity-conditional (charging vs fleeing):**
+
+| bin | approach v (m/s) | α | φ |
+| --- | --- | --- | --- |
+| **charging** (+0.45) | | **2.88** | **1.84** |
+| mid (−0.08) | | 2.70 | 2.98 |
+| fleeing (−0.63) | | 2.34 | 3.16 |
+
+**The policy adapts — but backwards.** When the obstacle is *near* or *charging*, the policy picks **higher α** (CBF less active) and **lower φ** (less robustness margin). The opposite of "be careful when threatened."
+
+v2 (smoothed) shows the same pattern, slightly less pronounced. Both scenes (head_on, crossing) show the same direction.
+
+**The bimodal φ distribution explains why:** φ medians are 0.01 across all bins; means are pulled up by occasional jumps to 10.0 (max). The policy operates in two regimes:
+
+- **Default**: φ = 0.01 (CBF off, robot moves freely)
+- **Emergency**: φ = 10.0 (max margin, panic brake)
+
+When obstacles are far or fleeing, the policy spends more time in emergency mode (boosting the mean φ). When obstacles are charging or near, it spends MORE time in default mode (lowering mean φ).
+
+So the policy learned: **"When something is charging at me, *disable* the CBF and dodge manually."**
+
+## 34. Why? The CBF can't see obstacle velocity
+
+We dropped `L_f h` (the Lie derivative term that accounts for obstacle motion) when we switched from GT-position CBF to grid-derived CBF. The new `safety_filter_grid` uses only static SDF — it treats every obstacle as if frozen in place.
+
+For a *static* obstacle this is fine. For a *moving* one:
+
+- CBF observes obstacle at position **X**, computes `A = ∇h` pointing away from X
+- CBF projects u away from X
+- But by the time the robot moves, the obstacle has moved to **X + v·δt**
+- "Away from X" is no longer "away from current obstacle position"
+- For a charging obstacle, the CBF's pushaway direction can land the robot exactly where the obstacle is heading
+
+**The policy may have correctly learned that the CBF's direction is wrong for moving obstacles, and that the best response is to disable it (low φ, high α) and dodge with raw velocity using the BEV directly.**
+
+This is testable. Two ablations to verify:
+
+1. **Fixed-action ablation on `crossing`/`head_on`**: compare (α=5, φ=0.01) ("CBF off") vs (α=2, φ=1.0) (tuned). If "CBF off" wins on moving scenes, our CBF is the bottleneck and the policy is correctly disabling it. If it loses, the policy's strategy is just bad and there's room for the policy to learn better.
+2. **Add `L_f h` back to grid CBF**: estimate obstacle velocity from BEV history (3-frame finite difference), inject as Lie derivative in the constraint. CBF becomes velocity-aware. Retrain and see if policy switches to a smoother modulation strategy instead of bimodal panic-brake.
+
+(2) is the more substantive fix. It re-derives the original ISSf-CBF math with the missing velocity term, but adapted to grid input. Probably 1-2 hours of code + 1 hr retrain.
+
+## 35. Reframe for the paper (potential)
+
+If `L_f h` is indeed the bottleneck, the story becomes:
+
+> Existing safety filters (ISSf, TISSf) use **geometry-only** state in the constraint. We extend the framework to **velocity-aware** robustification by adding L_f h to a grid-derived CBF and learning the modulation parameters. Result: learned (α, φ) beats fixed when the CBF actually has access to a faithful constraint.
+
+This is a real contribution. It frames our finding as "the prior CBF formulation has a missing term that prevents learned adaptation from working — we fix it, and adaptation pays off." Much stronger than "learned approximately ties fixed."
+
+### Honest open questions for buddy
+
+- Does the fixed-action ablation (item 1 above) support the hypothesis that CBF direction is wrong for moving obstacles? If "CBF off" beats "tuned CBF" on `crossing`/`head_on`, we have a clean signal.
+- Is L_f h estimation from BEV history numerically stable? 3-frame finite-difference at 50Hz on a 16×16 grid might be too noisy to be useful.
+- If adding L_f h does fix the policy's strategy, does it actually translate to safety gains in the hard env, or do we still get the spawn-collision floor that nukes everything?
+
+Currently no further training in flight. Waiting on the ablation decision before spending another GPU cycle.
+
+## 36. Fixed-action ablation — tuned CBF beats "CBF off" even on moving scenes
+
+Ran ISSf at 4 (α, φ) settings × 3 scenes to test whether the policy's instinct to "disable CBF when charged" was actually correct. Hypothesis: if (α=5, φ=0.01) ("CBF off") OUTPERFORMS (α=2, φ=1.0) ("tuned") on moving scenes, the CBF design is the bottleneck.
+
+Results (no L_f h yet):
+
+| scene | α=2, φ=1.0 (tuned) | α=5, φ=0.01 (CBF off) | α=2, φ=0.1 | α=5, φ=1.0 |
+| --- | --- | --- | --- | --- |
+| corridor | 88.1 / 4.2 / 7.7 | 84.4 / 10.9 / 4.6 | 87.0 / 8.7 / 4.3 | 87.9 / 8.4 / 3.7 |
+| crossing | **80.5 / 19.5** | 76.6 / 23.4 | 76.9 / 23.1 | 78.0 / 22.0 |
+| head_on | **82.6 / 17.4** | 80.0 / 20.0 | 77.9 / 22.1 | 82.1 / 17.9 |
+
+(reach% / crash% / timeout%)
+
+**Tuned (α=2, φ=1.0) wins on every moving scene by 2-4 points crash vs "CBF off".** The policy's strategy of disabling the CBF when threatened is **suboptimal** — the tuned CBF actually helps more than it hurts even on moving obstacles.
+
+So the diagnosis is NOT "CBF is broken for moving obstacles." The CBF works fine; PPO just didn't find the right operating point.
+
+## 37. L_f h fix — barely moves the needle
+
+Implemented oracle L_f h: the action term now reads the closest obstacle's drift velocity from `env._obstacle_velocities` (kinematic obstacles report 0 velocity in physics — must read drift state directly), rotates into body frame, passes to `safety_filter_grid` as `closest_obs_velocity_body`. The constraint becomes:
+
+```text
+A . u_xy >= phi * ||A||^2 - alpha * h - L_f h
+L_f h = -lam * gamma * exp(-gamma * sdf) * (sdf_grad_body . v_closest_body)
+```
+
+For a closing obstacle, L_f h < 0 → RHS larger → more outward velocity demanded. Math sign-checked.
+
+Sanity passed: corridor (static, drift=0) gave bit-identical results to no-L_f-h. ✓
+
+Moving scenes — comparison no-L_f-h vs L_f-h-ON (crash %):
+
+| scene + setting | no L_f h | L_f h ON | Δ |
+| --- | --- | --- | --- |
+| crossing α=2, φ=1.0 | 19.5 | 18.4 | -1.1 |
+| crossing α=5, φ=0.01 | 23.4 | 23.2 | ~0 |
+| crossing α=2, φ=0.1 | 23.1 | 21.8 | -1.3 |
+| crossing α=5, φ=1.0 | 22.0 | 21.1 | -0.9 |
+| head_on α=2, φ=1.0 | 17.4 | **18.9** | +1.5 (worse) |
+| head_on α=5, φ=0.01 | 20.0 | 19.9 | ~0 |
+| head_on α=2, φ=0.1 | 22.1 | 20.8 | -1.3 |
+| head_on α=5, φ=1.0 | 17.9 | 19.2 | +1.3 |
+
+All deltas within 95% CI noise. Half slightly better, half slightly worse.
+
+**Why L_f h didn't help meaningfully:**
+
+- Obstacles drift at ~1 m/s; CBF runs at 50 Hz → ~2 cm of obstacle motion per step
+- The static CBF already re-evaluates positions every step → effectively catches the obstacle motion implicitly
+- L_f h only adds the *instantaneous* drift correction. Over one step, that correction is tiny.
+- L_f h matters most when there's **latency** between obs and action (slow planning, remote control). At 50 Hz reactive control, the static CBF can catch up.
+
+So the missing-physics hypothesis (Section 34) is **ruled out**.
+
+## 38. Final state for tonight
+
+We've now ruled out both top candidate explanations for "RL doesn't beat fixed":
+
+- **Not the corner attractor** (we broke it with anchor + small init_std; new policies operate in distributed regimes)
+- **Not the missing L_f h** (oracle implementation provides no measurable benefit)
+
+The remaining honest conclusion: **PPO converges to a suboptimal bimodal panic-brake strategy in this setting, and we can't fix it just by tuning the env or fixing the CBF math.** The optimization process itself is the bottleneck — gradient descent in this reward landscape finds local minima that don't beat a hand-tuned fixed point.
+
+### What we know solidly (paper-worthy findings)
+
+1. **Mechanistic story of corner attractor + how to break it** (anchor init + init_std=0.1). Verified with action distributions, CBF intervention rates, multiple ablations.
+2. **In a deployment-realistic regime (lidar BEV + DR), tuned fixed ISSf is hard to beat.** Single (α=2, φ=1.0) dominates the sweep across 7 scenes. Per-bin analysis shows where this comes from.
+3. **The proprio-edge hypothesis was confirmed but is reactive, not preventive.** Policy modulates φ by 10× across speed terciles, but the modulation is lagged-correlation with danger, not anticipation.
+4. **L_f h doesn't help at 50 Hz reactive control.** The static CBF's re-evaluation rate already handles obstacle motion. (This is itself a useful negative finding for the safe-RL literature.)
+
+### Paths for tomorrow
+
+- **BC warm-start from ISSf + PPO fine-tune**: sidesteps the optimization issue. If PPO can't find the right operating point from scratch, hand it the answer and let it refine. Last shot at "learned > fixed."
+- **Add extension #2 or #3** to the env: density variation (cheap) or mid-episode DR shifts (brings Arch A back, RMA distillation slot). New env structure might give adaptation more to leverage.
+- **Reframe the paper around the negative result + mechanism**: title could become "Why learned CBF parameters tie fixed in lidar-driven safety filters: a mechanistic analysis." Less flashy but defensible.
+
+Pick one tomorrow with fresh eyes. Calling it for tonight.

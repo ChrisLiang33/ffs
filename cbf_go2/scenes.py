@@ -28,6 +28,46 @@ MOVING_SCENES: dict[str, list[tuple[float, float, float, float]]] = {
         (OFF[0], OFF[1], 0.0, 0.0),
         (OFF[0], OFF[1], 0.0, 0.0),
     ],
+    # Single obstacle crossing the robot's path laterally at 1.2 m/s.
+    # Robot is at (0,0); obstacle starts off to the right, sweeps left.
+    "traversing": [
+        (2.0,  2.5, 0.0, -1.2),
+        (OFF[0], OFF[1], 0.0, 0.0),
+        (OFF[0], OFF[1], 0.0, 0.0),
+        (OFF[0], OFF[1], 0.0, 0.0),
+    ],
+    # Single obstacle approaching the robot head-on at 0.8 m/s.
+    # Tests anticipating closing-velocity.
+    "head_on": [
+        (3.0, 0.0, -0.8, 0.0),
+        (OFF[0], OFF[1], 0.0, 0.0),
+        (OFF[0], OFF[1], 0.0, 0.0),
+        (OFF[0], OFF[1], 0.0, 0.0),
+    ],
+    # Two obstacles closing on each other (gap shrinks over time).
+    # Robot must thread the closing gap — pure coordination test.
+    "squeeze": [
+        (1.5,  1.5, 0.0, -0.8),
+        (1.5, -1.5, 0.0,  0.8),
+        (OFF[0], OFF[1], 0.0, 0.0),
+        (OFF[0], OFF[1], 0.0, 0.0),
+    ],
+    # Three obstacles in alternating-direction zigzag motion.
+    # Tests adapting to multi-trajectory pattern.
+    "weaving": [
+        (1.0,  0.8, 0.0, -0.6),
+        (2.0, -0.8, 0.0,  0.6),
+        (3.0,  0.8, 0.0, -0.6),
+        (OFF[0], OFF[1], 0.0, 0.0),
+    ],
+    # Static gauntlet layout but all four obstacles drifting slowly in random directions.
+    # Tests dense + dynamic combined.
+    "gauntlet_moving": [
+        (1.5,  0.0,  0.0,  0.5),
+        (2.0,  0.6,  0.4, -0.3),
+        (2.0, -0.6, -0.4,  0.3),
+        (2.5,  0.0,  0.0, -0.5),
+    ],
 }
 
 

@@ -44,7 +44,7 @@ class CommandsCfg:
         simple_heading=True,
         resampling_time_range=(1e9, 1e9),
         ranges=mdp.UniformPose2dCommandCfg.Ranges(
-            pos_x=(-3.0, 3.0), pos_y=(-3.0, 3.0), heading=(-math.pi, math.pi)
+            pos_x=(-2.0, 2.0), pos_y=(-2.0, 2.0), heading=(-math.pi, math.pi)
         ),
         debug_vis=True,
     )
@@ -123,7 +123,7 @@ class RewardsCfg:
         weight=-200.0,
         params={"term_keys": ["obstacle_hit", "base_contact"]},
     )
-    action_rate = RewTerm(func=cbf_mdp.action_rate_clamped, weight=-0.05)
+    action_rate = RewTerm(func=cbf_mdp.action_rate_clamped, weight=-0.3)
     timeout_penalty = RewTerm(func=cbf_mdp.timeout_fired, weight=-50.0)
 
 
@@ -158,7 +158,7 @@ class GoalGo2EnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = LOW_LEVEL_ENV_CFG.sim.dt
         self.sim.render_interval = LOW_LEVEL_ENV_CFG.decimation
         self.decimation = 4  # 50 Hz outer rate, matches inner locomotion (200 Hz / 4 = 50 Hz)
-        self.episode_length_s = 10.0
+        self.episode_length_s = 6.0  # hard env: tight time budget forces speed-vs-safety tradeoff
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt
 
@@ -203,9 +203,9 @@ class GoalGo2EnvCfg(ManagerBasedRLEnvCfg):
             params={
                 "obstacle_names": OBSTACLE_NAMES,
                 "range_xy": 2.5,
-                "min_dist_from_origin": 1.5,
+                "min_dist_from_origin": 0.8,  # hard env: tighter obstacle spawns
                 "drift_prob": 1.0,
-                "drift_speed_range": (0.5, 1.5),
+                "drift_speed_range": (1.0, 2.5),  # hard env: obstacles at/above robot max speed
             },
         )
 

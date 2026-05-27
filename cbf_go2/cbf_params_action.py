@@ -50,8 +50,14 @@ class CBFParamsAction(ActionTerm):
         return torch.stack([alpha, phi], dim=1)
 
     def process_actions(self, actions: torch.Tensor):
+        # EMA smoothing on the raw action: smoothed = decay * prev + (1 - decay) * new.
+        # Decoupling lets the CBF see a smooth (alpha, phi) signal regardless of how
+        # jumpy PPO's per-step output is — protects the locomotion from sudden CBF
+        # behavior shifts that would destabilize the gait.
         self._prev_raw_actions[:] = self._raw_actions
-        self._raw_actions[:] = actions.clamp(-1.0, 1.0)
+        new_clamped = actions.clamp(-1.0, 1.0)
+        decay = self.cfg.ema_decay
+        self._raw_actions[:] = decay * self._raw_actions + (1.0 - decay) * new_clamped
 
     @property
     def prev_raw_actions(self) -> torch.Tensor:
@@ -80,6 +86,34 @@ class CBFParamsAction(ActionTerm):
             grid_extent=self.cfg.grid_extent,
         )
         grid = grid_flat.reshape(self.num_envs, self.cfg.grid_size, self.cfg.grid_size)
+
+        # Oracle L_f h: find the closest obstacle from GT positions, take its world-frame
+        # drift velocity (from env._obstacle_velocities — kinematic obstacles have
+        # zero physics velocity, so we must read the drift state directly), rotate
+        # into body frame. The CBF then anticipates obstacle motion.
+        v_closest_body = None
+        if self.cfg.use_lfh_oracle and hasattr(self._env, "_obstacle_velocities"):
+            robot_pos = self.robot.data.root_pos_w[:, :2]
+            obs_positions = torch.stack(
+                [self._env.scene[name].data.root_pos_w[:, :2] for name in self._obstacle_names], dim=1
+            )
+            obs_velocities_w = self._env._obstacle_velocities  # (N, K, 2), drift in world frame
+            rel = obs_positions - robot_pos.unsqueeze(1)
+            dist_per_obs = torch.linalg.norm(rel, dim=-1).clamp_min(1e-6)
+            _, idx = dist_per_obs.min(dim=-1)
+            v_closest_world = torch.gather(obs_velocities_w, 1, idx[:, None, None].expand(-1, 1, 2)).squeeze(1)
+            # Rotate world -> body using robot yaw
+            quat = self.robot.data.root_quat_w
+            yaw = torch.atan2(
+                2 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
+                1 - 2 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
+            )
+            cy = torch.cos(yaw); sy = torch.sin(yaw)
+            v_closest_body = torch.stack([
+                cy * v_closest_world[:, 0] + sy * v_closest_world[:, 1],
+                -sy * v_closest_world[:, 0] + cy * v_closest_world[:, 1],
+            ], dim=-1)
+
         u_safe = cbf.safety_filter_grid(
             u_nom=u_nom,
             grid=grid,
@@ -89,6 +123,7 @@ class CBFParamsAction(ActionTerm):
             phi=params[:, 1],
             lam=self.cfg.lam,
             gamma=self.cfg.gamma,
+            closest_obs_velocity_body=v_closest_body,
         )
         u_safe = torch.nan_to_num(u_safe, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
 
@@ -120,5 +155,11 @@ class CBFParamsActionCfg(ActionTermCfg):
     phi_range: tuple = (0.01, 10.0)
     lam: float = 1.0
     gamma: float = 1.0
+    # EMA decay on the raw action: smoothed = decay * prev + (1-decay) * new.
+    # 0.7 means ~10 steps (0.2s @ 50Hz) to settle ~95% to a new policy output.
+    ema_decay: float = 0.7
+    # Use oracle obstacle velocities to add L_f h to the grid CBF. Lets the filter
+    # anticipate obstacle motion instead of treating every obstacle as static.
+    use_lfh_oracle: bool = True
     grid_size: int = 16
     grid_extent: float = 3.0
