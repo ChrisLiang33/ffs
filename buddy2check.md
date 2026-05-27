@@ -47,18 +47,36 @@ A · u_xy + alpha · h - phi · ||A||² >= 0
 - RL ([cbf_go2/rsl_rl_cfg.py](cbf_go2/rsl_rl_cfg.py)): PPO via rsl_rl, 3×128 ELU MLP, 4096 envs, 200 iters (~7 min on RTX 5090).
 - Rewards: dense progress (velocity toward goal) + goal_bonus (+50) + crash_penalty (-50) + timeout_penalty (-50) + action_rate (-0.05). Episode = 10s during training.
 
-## 5. ISSf vs RL — proper eval
+## 5. ISSf vs TISSf vs RL — proper eval
 
-[eval_cbf.py](eval_cbf.py), 256 envs × 2000 outer steps, episode_length_s = 30, ~1300-1600 episodes per condition. Wilson 95% CIs.
+[eval_cbf.py](eval_cbf.py), 256 envs × 2000 outer steps, episode_length_s = 30, 1200-1600 episodes per condition. Wilson 95% CIs. Per-episode data dumped to `results/*.json`.
+
+TISSf formulation (Wang et al.):  `ε(h) = ε₀ · exp(λ·h)`,  `φ = 1/ε(h)`.  λ=0 recovers ISSf with fixed φ = 1/ε₀.
 
 | method | reach | crash | timeout | time-to-reach |
 | --- | --- | --- | --- | --- |
-| ISSf (α=2, φ=0.5) | 87.4% [85.5, 89.1] | 4.0% [3.0, 5.2] | 8.6% | 17.5 sec |
-| **RL (model_199)** | **94.6% [93.4, 95.6]** | **1.2% [0.8, 1.8]** | **4.2%** | 18.1 sec |
+| ISSf (α=2, φ=0.5) | 90.5% [88.9, 92.0] | 4.0% [3.1, 5.1] | 5.5% | 17.6 sec |
+| TISSf best (ε₀=2, λ=1.5) | 89.5% [87.8, 91.0] | 3.6% [2.7, 4.7] | 6.9% | 17.3 sec |
+| **RL (model_199)** | **94.3% [93.1, 95.4]** | **0.5% [0.3, 1.0]** | **5.2%** | 18.2 sec |
 
-**RL dominates ISSf on both safety and reach**, non-overlapping CIs. RL trades ~0.6 sec speed for major reliability gain.
+**RL dominates both baselines on safety and reach.** TISSf is basically tied with ISSf — CIs overlap.
 
-Note: prior smoke runs gave ISSf 95%/1% — those were small-sample noise (~50-150 eps). Real ISSf is closer to 87%/4%.
+**Why TISSf doesn't beat ISSf here:** our scene is too dense (4 obstacles in a plus pattern at distance 1.2m, goals in (-3,3)²) — the robot is always near some obstacle, so TISSf's "low φ in interior" advantage doesn't kick in. A sparse scene should show TISSf catching up. RL still wins because it learns directional context (which side of an obstacle to detour given the goal direction) — something a φ(h)-only hand rule can't capture.
+
+**TISSf sweep** (6 configs of (ε₀, λ)):
+
+| ε₀ | λ | φ at boundary | φ in interior | reach | crash | timeout |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0.5 | 0.5 | 2.0 | 1.21 | 30% | 28% | 42% |
+| 1.0 | 0.5 | 1.0 | 0.61 | 85% | 6% | 9% |
+| 2.0 | 0.5 | 0.5 | 0.30 | 89% | 4% | 7% |
+| 0.5 | 1.5 | 2.0 | 0.45 | 58% | 22% | 20% |
+| 1.0 | 1.5 | 1.0 | 0.22 | 86% | 5% | 9% |
+| 2.0 | 1.5 | 0.5 | 0.11 | 89.5% | 3.6% | 6.9% |
+
+Anything with φ(boundary) > 1 crashes a lot — the locomotion can't track the high tangential pushback. φ(boundary) ≈ 0.5 (matching ISSf) gives the best TISSf, but it's not better than ISSf.
+
+Note: prior smoke runs gave ISSf 95%/1% — those were small-sample noise (~50-150 eps). Real ISSf is ~90%/4%.
 
 ## Things to push back on
 

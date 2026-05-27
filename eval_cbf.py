@@ -17,9 +17,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--task", default="Isaac-Goal-Go2-v0")
 parser.add_argument("--num_envs", type=int, default=256)
 parser.add_argument("--steps", type=int, default=2000)
-parser.add_argument("--mode", choices=["issf", "rl"], required=True)
+parser.add_argument("--mode", choices=["issf", "rl", "tissf"], required=True)
 parser.add_argument("--alpha", type=float, default=2.0)
 parser.add_argument("--phi", type=float, default=0.5)
+parser.add_argument("--epsilon_0", type=float, default=1.0, help="TISSf: phi(0) = 1/epsilon_0")
+parser.add_argument("--lam", type=float, default=1.5, help="TISSf: epsilon(h) = epsilon_0 * exp(lam*h)")
+parser.add_argument("--save", default=None, help="Optional path to dump per-episode results as JSON")
 parser.add_argument("--checkpoint", default=None)
 parser.add_argument("--agent", default="rsl_rl_cfg_entry_point")
 parser.add_argument("--episode_length_s", type=float, default=30.0)
@@ -75,6 +78,10 @@ def main(env_cfg, agent_cfg):
         runner.load(resume)
         policy = runner.get_inference_policy(device=device)
         mode_str = f"RL ({os.path.basename(resume)})"
+    elif args.mode == "tissf":
+        from cbf_go2.env_cfg import OBSTACLE_NAMES, OBSTACLE_RADIUS
+        from cbf_go2.mdp import tissf_action
+        mode_str = f"TISSf (alpha={args.alpha}, epsilon_0={args.epsilon_0}, lam={args.lam})"
     else:
         fixed = torch.zeros((args.num_envs, 2), device=device)
         fixed[:, 0] = to_norm(args.alpha, 0.1, 5.0)
@@ -84,26 +91,41 @@ def main(env_cfg, agent_cfg):
     term_mgr = env.unwrapped.termination_manager
     obs = env.get_observations()
 
-    n_reached = 0
-    n_crashed = 0
-    n_timeout = 0
     ep_steps = torch.zeros(args.num_envs, device=device, dtype=torch.long)
-    reach_lengths: list[int] = []
+    episodes: list[tuple[str, int]] = []  # (outcome, length)
 
     for _ in range(args.steps):
         with torch.inference_mode():
-            action = policy(obs) if args.mode == "rl" else fixed
+            if args.mode == "rl":
+                action = policy(obs)
+            elif args.mode == "tissf":
+                action = tissf_action(
+                    env.unwrapped,
+                    obstacle_names=OBSTACLE_NAMES,
+                    obstacle_radius=OBSTACLE_RADIUS,
+                    alpha=args.alpha,
+                    epsilon_0=args.epsilon_0,
+                    lam=args.lam,
+                )
+            else:
+                action = fixed
             obs, _, dones, _ = env.step(action)
         ep_steps += 1
         reached_mask = term_mgr.get_term("goal_reached")
         crashed_mask = term_mgr.get_term("base_contact") | term_mgr.get_term("obstacle_hit")
         timeout_mask = term_mgr.get_term("time_out")
-        n_reached += int(reached_mask.sum().item())
-        n_crashed += int(crashed_mask.sum().item())
-        n_timeout += int(timeout_mask.sum().item())
         for idx in reached_mask.nonzero(as_tuple=True)[0].tolist():
-            reach_lengths.append(int(ep_steps[idx]))
+            episodes.append(("reached", int(ep_steps[idx])))
+        for idx in crashed_mask.nonzero(as_tuple=True)[0].tolist():
+            episodes.append(("crashed", int(ep_steps[idx])))
+        for idx in timeout_mask.nonzero(as_tuple=True)[0].tolist():
+            episodes.append(("timeout", int(ep_steps[idx])))
         ep_steps[dones] = 0
+
+    n_reached = sum(1 for o, _ in episodes if o == "reached")
+    n_crashed = sum(1 for o, _ in episodes if o == "crashed")
+    n_timeout = sum(1 for o, _ in episodes if o == "timeout")
+    reach_lengths = [n for o, n in episodes if o == "reached"]
 
     total = n_reached + n_crashed + n_timeout
 
@@ -123,6 +145,24 @@ def main(env_cfg, agent_cfg):
         mean_len = sum(reach_lengths) / len(reach_lengths)
         print(f"  mean steps to reach: {mean_len:.1f}   ({mean_len * 0.02:.2f} sec)")
     print()
+
+    if args.save:
+        import json
+        result = {
+            "mode": mode_str,
+            "args": {k: v for k, v in vars(args).items() if not k.startswith("_")},
+            "summary": {
+                "total": total,
+                "reached": n_reached,
+                "crashed": n_crashed,
+                "timeout": n_timeout,
+                "mean_reach_steps": (sum(reach_lengths) / len(reach_lengths)) if reach_lengths else None,
+            },
+            "episodes": [{"outcome": o, "length": n} for o, n in episodes],
+        }
+        with open(args.save, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+        print(f"  saved to {args.save}")
 
     env.close()
 

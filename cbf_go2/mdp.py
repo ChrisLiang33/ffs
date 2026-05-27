@@ -55,6 +55,48 @@ def timeout_fired(env: ManagerBasedRLEnv) -> torch.Tensor:
     return env.termination_manager.time_outs.float()
 
 
+def tissf_action(
+    env: ManagerBasedRLEnv,
+    obstacle_names: tuple,
+    obstacle_radius: float = 0.5,
+    robot_radius: float = 0.3,
+    alpha: float = 2.0,
+    epsilon_0: float = 1.0,
+    lam: float = 1.5,
+    h_lam: float = 1.0,
+    h_gamma: float = 1.0,
+    alpha_range: tuple = (0.1, 5.0),
+    phi_range: tuple = (0.01, 10.0),
+) -> torch.Tensor:
+    """TISSf baseline per Wang et al.:  epsilon(h) = epsilon_0 * exp(lam * h),  phi = 1/epsilon(h).
+
+    h here is the smoothed CBF (h_lam, h_gamma are the same constants used in the CBF filter).
+    lam = 0 recovers ISSf with phi = 1/epsilon_0 everywhere. Larger lam concentrates the
+    buffer near the boundary and frees up the interior.
+
+    Returns the *normalized* action in [-1, 1] for direct use with CBFParamsAction.
+    """
+    from . import cbf
+
+    robot: Articulation = env.scene["robot"]
+    obs_xy = torch.stack(
+        [env.scene[name].data.root_pos_w[:, :2] for name in obstacle_names], dim=1
+    )
+    sdf, sdf_grad = cbf.compute_sdf(robot.data.root_pos_w[:, :2], obs_xy, obstacle_radius, robot_radius)
+    h, _ = cbf.compute_h(sdf, sdf_grad, lam=h_lam, gamma=h_gamma)
+    phi = (1.0 / epsilon_0) * torch.exp(-lam * h)
+
+    a_lo, a_hi = alpha_range
+    p_lo, p_hi = phi_range
+    norm_alpha = 2.0 * (alpha - a_lo) / (a_hi - a_lo) - 1.0
+    norm_phi = (2.0 * (phi - p_lo) / (p_hi - p_lo) - 1.0).clamp(-1.0, 1.0)
+
+    action = torch.empty((env.num_envs, 2), device=env.device)
+    action[:, 0] = norm_alpha
+    action[:, 1] = norm_phi
+    return action
+
+
 def obstacles_body_frame(
     env: ManagerBasedRLEnv,
     obstacle_names: tuple,
