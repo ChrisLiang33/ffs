@@ -53,8 +53,10 @@ def main(env_cfg, agent_cfg):
 
     obs = env.get_observations()
     samples = []
-    intervened = []  # per-step bool tensor of "did CBF actually project?"
+    intervened = []        # per-step bool tensor of "did CBF actually project?"
+    robot_speeds = []      # per-step robot linear speed magnitude (proxy for "fast approach")
     action_term = env.unwrapped.action_manager.get_term("cbf_params")
+    robot = env.unwrapped.scene["robot"]
     for _ in range(args.steps):
         with torch.inference_mode():
             action = policy(obs)
@@ -62,6 +64,8 @@ def main(env_cfg, agent_cfg):
             obs, _, _, _ = env.step(action)
             if hasattr(action_term, "_last_intervened"):
                 intervened.append(action_term._last_intervened.detach().clone().cpu())
+            speed = torch.linalg.norm(robot.data.root_lin_vel_b[:, :2], dim=-1)
+            robot_speeds.append(speed.detach().clone().cpu())
 
     all_acts = torch.cat(samples, dim=0).clamp(-1.0, 1.0)
     alpha = (all_acts[:, 0] + 1.0) / 2.0 * (5.0 - 0.1) + 0.1   # range (0.1, 5.0)
@@ -80,6 +84,25 @@ def main(env_cfg, agent_cfg):
         inter = torch.cat(intervened).float()
         print(f"  cbf intervention rate: {inter.mean().item():.1%}   "
               f"(fraction of steps the safety filter actually projected u_nom -> u_safe)")
+
+    # Velocity-conditional action stats: does the policy modulate (alpha, phi) based on speed?
+    # Proprio edge test: if RL uses base velocity, expect phi up + alpha down at high speeds.
+    if robot_speeds:
+        speeds = torch.cat(robot_speeds)
+        # Tercile bins on robot speed
+        s_lo = speeds.quantile(1/3.0)
+        s_hi = speeds.quantile(2/3.0)
+        bins = [("slow", speeds < s_lo), ("mid", (speeds >= s_lo) & (speeds < s_hi)), ("fast", speeds >= s_hi)]
+        print(f"\n  speed-conditional action means (speed terciles: <{s_lo:.2f}, {s_lo:.2f}-{s_hi:.2f}, >={s_hi:.2f} m/s):")
+        print(f"    {'bin':<6} {'n':<8} {'speed':<8} {'alpha':<8} {'phi':<8} {'cbf%':<6}")
+        for name, mask in bins:
+            if mask.sum() == 0:
+                continue
+            a_bin = alpha[mask].mean().item()
+            p_bin = phi[mask].mean().item()
+            s_bin = speeds[mask].mean().item()
+            i_bin = inter[mask].mean().item() if intervened else float("nan")
+            print(f"    {name:<6} {int(mask.sum()):<8} {s_bin:<7.2f} {a_bin:<7.2f} {p_bin:<7.2f} {i_bin:.1%}")
     print()
 
     env.close()

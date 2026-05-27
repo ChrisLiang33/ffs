@@ -508,3 +508,36 @@ This isn't the "learned > fixed" story we hoped for, but it's a clean negative r
 - **Constrained MDP (CPO)**: treat crash as a hard constraint rather than a reward term. Removes the "trade safety for progress" gradient that pulls α up.
 - **Progress reward → 0 (sparse reward only)**: removes the gradient pulling α up. Risk: PPO may not learn at all.
 - **Accept this as the finding** and write the paper around "learned ≈ fixed in deployment-realistic regimes, with a precise mechanism for why."
+
+## 29. Proprio-edge confirmed — RL adapts (α, φ) by speed regime
+
+Buddy's reframe: we've been asking the wrong question. ISSf and TISSf are blind to proprioception — they only see geometry (h, the SDF). Our RL policy gets base velocity, angular velocity, gravity vector, action history. So even if RL doesn't beat ISSf on average reach/crash, it has structural information advantages that TISSf can't have:
+
+1. **Velocity-aware**: approaching at 1 m/s vs 0.3 m/s needs different margin
+2. **Direction-aware**: head-on vs tangential approach
+3. **DR-adaptive**: a slipping/heavy robot needs more margin
+
+Added speed-conditional action binning to `dump_action.py` — at each step, record robot base linear speed, then bin actions into speed terciles. Result for Arch D 400-iter checkpoint:
+
+| bin | speed (m/s) | α mean | φ mean | CBF active |
+| --- | --- | --- | --- | --- |
+| **slow** | 0.21 | 3.80 | **2.53** | **37.6%** |
+| mid | 0.73 | 4.42 | 1.43 | 14.1% |
+| **fast** | 1.00 | 4.80 | **0.24** | **2.0%** |
+
+**The policy modulates φ by ~10× and CBF intervention by ~18× across speed regimes.** Behavior is exactly right:
+
+- **Slow (near obstacle)**: φ=2.53 (very robust), α=3.80 (CBF more active) → CBF projects 37.6%
+- **Fast (open space)**: φ=0.24 (CBF nearly off), α=4.80 → CBF projects 2.0%
+
+The chain: robot is slow ⇔ CBF projecting its velocity ⇔ near obstacles. Robot is fast ⇔ CBF doing nothing ⇔ in open space. The policy correctly uses its own velocity as a proxy for obstacle proximity *via its own embodiment*, and modulates (α, φ) accordingly.
+
+**This is exactly the proprio-edge behavior TISSf cannot do.** TISSf modulates φ = f(h) — geometric distance only. Our policy modulates based on dynamics state — what the robot is *experiencing*, which encodes "am I being slowed by the CBF right now?" That's a richer signal than h alone.
+
+### What this means for the story
+
+Our headline comparison (average reach/crash per scene) showed RL ≈ ISSf — looked like a wash. **That comparison hides the adaptation.** The policy is being aggressive in safe states and conservative in risky states — averaging out to similar overall numbers, but doing the right thing locally.
+
+The right comparison: bin episodes by approach velocity, compare crash rates per bin. If RL wins in the high-velocity-approach bin specifically (where ISSf is too aggressive by being fixed), we have a real proprio-edge story even when averages tie.
+
+Implementation in flight: extending `dump_action.py` and `eval_cbf.py` to log per-step `(speed, crashed_this_episode)` so we can compute speed-conditional crash rates for RL vs ISSf-1.0.
