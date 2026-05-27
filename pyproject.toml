@@ -1,0 +1,12 @@
+[project]
+name = "cbf_go2"
+version = "0.0.1"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cbf_go2*"]
