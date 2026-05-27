@@ -182,6 +182,6 @@ class GoalGo2EnvCfg(ManagerBasedRLEnvCfg):
             params={
                 "obstacle_names": OBSTACLE_NAMES,
                 "range_xy": 2.5,
-                "min_dist_from_origin": 0.8,
+                "min_dist_from_origin": 1.3,
             },
         )

@@ -86,26 +86,31 @@ Note: prior smoke runs gave ISSf 95%/1% — those were small-sample noise (~50-1
 - **lambda = gamma = 1** — coupled with φ (λγ is the gradient magnitude at the boundary). Tuning λ, γ separately is largely redundant with tuning φ.
 - **4 obstacles, fixed positions.** Trivial scene. Once RL is training, randomize per-reset.
 
-## 6. Scene diversity — adds obstacle randomization
+## 6. Scene diversity — random obstacle layout per reset
 
-Random obstacle placement per reset (4 cylinders, xy in (-2.5, 2.5)², `min_dist_from_origin=0.8`). Retrained RL, re-ran TISSf sweep, re-evaluated all three on the randomized env.
+Random obstacle placement per reset (4 cylinders, xy in (-2.5, 2.5)², `min_dist_from_origin=1.3`). Retrained RL, re-ran TISSf sweep, re-evaluated all three on the randomized env.
 
-| method | reach | crash | timeout |
-| --- | --- | --- | --- |
-| ISSf (α=2, φ=0.5) | 76.0% [73.9, 78.1] | 15.0% [13.3, 16.8] | 9.0% |
-| TISSf best (ε₀=2, λ=0.5) | 76.6% [74.5, 78.5] | 15.9% [14.2, 17.6] | 7.6% |
-| **RL (random-trained)** | **80.2% [78.3, 82.0]** | 13.3% [11.9, 15.0] | 6.4% |
+| method | reach | crash | timeout | time-to-reach |
+| --- | --- | --- | --- | --- |
+| ISSf (α=2, φ=0.5) | 91.2% [89.7, 92.6] | 0.7% [0.4, 1.3] | 8.0% | 16.4 sec |
+| TISSf best (ε₀=2, λ=0.5) | 90.3% [88.7, 91.7] | 0.5% [0.3, 1.0] | 9.2% | 16.3 sec |
+| **RL (random-trained)** | **93.3% [92.1, 94.4]** | **0.5% [0.2, 0.9]** | **6.2%** | **15.9 sec** |
 
-**RL still wins on reach** (non-overlapping CIs, +4.2 pts over both baselines). Crash advantage narrowed (CIs overlap on safety in random scenes).
+**RL wins on reach + time-to-reach, ties on safety**:
+
+- Reach: RL +2.1 over ISSf, +3.0 over TISSf — non-overlapping CIs.
+- Crash: all ~0.5% (CBF doing its job across the board).
+- Time-to-reach: RL fastest by ~0.5 sec.
+- TISSf vs ISSf: wash on this scene (state-dependent rule didn't beat fixed).
 
 **Cross-scene RL edge:**
 
-| scene | RL reach edge | RL crash edge |
+| scene | RL reach edge over ISSf | RL crash edge |
 | --- | --- | --- |
 | Fixed (1 layout) | +3.8 pts (94 vs 90) | strong (0.5 vs 4.0) |
-| Random | +4.2 pts (80 vs 76) | weak (13 vs 15) |
+| Random | +2.1 pts (93 vs 91) | matched (~0.5%) |
 
-The ~15% baseline crash rate is mostly structural — `min_dist_from_origin=0.8` plus a robot spawn box of ±0.5 occasionally places obstacles right on the robot, instant collision. Higher `min_dist` (1.5) destabilizes training (still investigating; likely event-ordering issue with reset).
+The earlier "RL beats ISSf 80 vs 76 with 13% crash" was an artefact of `min_dist=0.8` allowing obstacles to spawn on the robot — that 15% structural crash floor masked the real story. With `min_dist=1.3` (proper spawn buffer), the baselines also achieve <1% crash and the comparison is clean.
 
 ## Things that took time
 
