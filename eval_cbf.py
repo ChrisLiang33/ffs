@@ -98,7 +98,9 @@ def main(env_cfg, agent_cfg):
 
     term_mgr = env.unwrapped.termination_manager
     # Apply the static scene layout once before stepping so all envs see it from t=0.
-    apply_scene(env.unwrapped, args.scene)
+    # force_init_positions=True so moving scenes get their initial obstacle layout set
+    # (subsequent calls won't overwrite positions, letting advance_obstacles integrate).
+    apply_scene(env.unwrapped, args.scene, force_init_positions=True)
     obs = env.get_observations()
 
     ep_steps = torch.zeros(args.num_envs, device=device, dtype=torch.long)

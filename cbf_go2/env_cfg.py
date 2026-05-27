@@ -193,14 +193,19 @@ class GoalGo2EnvCfg(ManagerBasedRLEnvCfg):
             },
         )
 
-        # randomize obstacle positions per reset (scene diversity)
+        # randomize obstacle positions per reset (scene diversity).
+        # Obstacles drift fast enough for the 3-frame BEV history to encode their velocity —
+        # this is the predictive signal the policy needs to actually benefit from proprio
+        # modulation (vs being a reactive panic-brake).
         self.events.randomize_obstacles = EventTerm(
             func=cbf_mdp.randomize_obstacle_positions,
             mode="reset",
             params={
                 "obstacle_names": OBSTACLE_NAMES,
                 "range_xy": 2.5,
-                "min_dist_from_origin": 1.5,  # bumped slightly to accommodate max radius 0.6
+                "min_dist_from_origin": 1.5,
+                "drift_prob": 1.0,
+                "drift_speed_range": (0.5, 1.5),
             },
         )
 

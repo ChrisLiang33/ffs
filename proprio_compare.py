@@ -94,7 +94,7 @@ def main(env_cfg, agent_cfg):
 
     term_mgr = env.unwrapped.termination_manager
     robot = env.unwrapped.scene["robot"]
-    apply_scene(env.unwrapped, args.scene)
+    apply_scene(env.unwrapped, args.scene, force_init_positions=True)
     obs = env.get_observations()
 
     # Rolling per-env speed buffer (size K) so we can compute mean of last K steps at termination.

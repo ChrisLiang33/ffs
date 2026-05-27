@@ -541,3 +541,62 @@ Our headline comparison (average reach/crash per scene) showed RL ≈ ISSf — l
 The right comparison: bin episodes by approach velocity, compare crash rates per bin. If RL wins in the high-velocity-approach bin specifically (where ISSf is too aggressive by being fixed), we have a real proprio-edge story even when averages tie.
 
 Implementation in flight: extending `dump_action.py` and `eval_cbf.py` to log per-step `(speed, crashed_this_episode)` so we can compute speed-conditional crash rates for RL vs ISSf-1.0.
+
+## 30. Velocity-binned crash comparison — proprio modulation is reactive, not preventive
+
+Wrote `proprio_compare.py`: per-env tracks robot speed each step, on termination records (mean_speed_last_30_steps, outcome). Bins episodes into speed terciles, computes reach/crash/timeout per bin. Same env, same DR, same seed for both methods.
+
+Arch D 400-iter vs ISSf-1.0 on corridor (1500 steps, ~1500 episodes each):
+
+| | n | speed | reach% | crash% | timeo% |
+| --- | --- | --- | --- | --- | --- |
+| **RL slow** | 559 | 0.49 | 81.2 | **17.7** | 1.1 |
+| **ISSf slow** | 411 | 0.45 | 83.2 | **12.7** | 4.1 |
+| RL mid | 559 | 0.86 | 96.6 | 3.2 | 0.2 |
+| ISSf mid | 411 | 0.87 | 100.0 | 0.0 | 0.0 |
+| RL fast | 559 | 0.98 | 99.8 | 0.2 | 0.0 |
+| ISSf fast | 411 | 0.98 | 100.0 | 0.0 | 0.0 |
+
+**The proprio-edge hypothesis didn't hold per-bin.** Both methods crash almost exclusively in the slow bin (which is just "episodes that ended near an obstacle, where the robot was slowed by the CBF"). Within the slow bin, ISSf actually crashes *less* (12.7% vs 17.7%). ISSf trades crashes for timeouts (4.1% vs 1.1%) — i.e., it gets stuck near obstacles rather than barging through.
+
+Note that RL completed 1677 episodes vs ISSf's 1233 in the same 1500-step run. **RL is 36% more aggressive overall** — moves faster on average, gets through episodes quicker, but also enters dangerous slow states more often.
+
+The interpretation: our policy's proprio modulation (φ swings 10× by speed) is **reactive, not preventive**.
+
+- Robot is slow ⇔ CBF is already projecting (already near an obstacle).
+- Policy picks higher φ in that state — but at that point the danger is already present.
+- The signal the policy reads (its own slowdown) is a **lagging indicator** of obstacle proximity.
+
+For adaptation to actually save crashes, the policy would need a **predictive signal** — "an obstacle is approaching in 0.5s, I should already be widening my margin." Our static-obstacle env doesn't provide that. The CNN sees obstacles but they're motionless, so there's no trajectory to extrapolate.
+
+## 31. Reframe — the right thesis is "learned wins when fixed can't exploit env structure"
+
+We've been asking "does learned beat fixed?" and not finding it. The honest reason is **our env is too simple for adaptation to matter.** A single fixed (α=2, φ=1.0) is essentially optimal for "static cylinders + random goal + simple navigation." Adaptive has nothing to leverage.
+
+The right thesis (this is a real research pivot):
+
+> **Learned (α, φ) beats fixed when the environment has structure that fixed parameters can't exploit.** In static + identifiable regimes, fixed conservative is provably near-optimal; in dynamic / multi-regime / time-varying regimes, learned modulation has a real upside.
+
+Four env extensions that provide the needed structure, ordered by implementation cost:
+
+| # | story | impl cost | what makes it interesting |
+| --- | --- | --- | --- |
+| **1** | Moving obstacles | **In progress** (drift 0.5–1.5 m/s + `crossing` scene) | BEV history → obstacle velocity → predictive φ. CBF sees `v_closest_obs` via L_f h equivalent |
+| **2** | Varying-density scenes | ~1 hr (more scene templates) | Spatial adaptation across episode |
+| **3** | Mid-episode DR shifts (carpet→ice) | ~3 hr (interval friction event) | Proprio "adapt to feel" channel directly tested |
+| **4** | Time pressure | ~2 hr (deadline obs + time-weighted reward) | Goal-conditioned adaptation |
+
+Current execution plan:
+
+1. **#1 first.** Training env now has `drift_prob=1.0, drift_speed_range=(0.5, 1.5)` so the policy is exposed to fast-moving obstacles during training. New eval scene `crossing` has two obstacles converging at 1 m/s toward the centerline at x=1.5 — classic dynamic obstacle problem.
+2. If #1 shows RL > ISSf on `crossing` clearly: that's the kernel of the new story. Write it up.
+3. If #1 doesn't show a gap: add #2 (density variation) to give spatial adaptation more to chew on.
+4. #3 and #4 are real research extensions — save for if #1 + #2 work and there's appetite.
+
+### Changes for the new framing (already pushed)
+
+- `cbf_go2/env_cfg.py`: training-time obstacle drift bumped to 100% drift, speed 0.5–1.5 m/s.
+- `cbf_go2/scenes.py`: added `MOVING_SCENES["crossing"]` with two converging obstacles. `apply_scene` learned about moving scenes: only sets positions on first call (`force_init_positions=True`), then lets `advance_obstacles` integrate.
+- `eval_cbf.py` + `proprio_compare.py`: pass `force_init_positions=True` on first step.
+
+Next training run is on the new env; eval will include `crossing` alongside the static scene suite.
