@@ -13,6 +13,7 @@ from isaaclab.assets import RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg, mdp
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.markers import VisualizationMarkersCfg
@@ -75,6 +76,10 @@ class ObservationsCfg:
         projected_gravity = ObsTerm(func=mdp.projected_gravity)
         goal = ObsTerm(func=mdp.generated_commands, params={"command_name": "goal_pose"})
         actions = ObsTerm(func=mdp.last_action)
+        obstacles = ObsTerm(
+            func=cbf_mdp.obstacles_body_frame,
+            params={"obstacle_names": OBSTACLE_NAMES},
+        )
 
         def __post_init__(self):
             self.concatenate_terms = True
@@ -84,7 +89,23 @@ class ObservationsCfg:
 
 @configclass
 class RewardsCfg:
-    pass
+    progress = RewTerm(
+        func=cbf_mdp.velocity_to_goal,
+        weight=1.0,
+        params={"command_name": "goal_pose"},
+    )
+    goal_bonus = RewTerm(
+        func=mdp.is_terminated_term,
+        weight=50.0,
+        params={"term_keys": "goal_reached"},
+    )
+    crash_penalty = RewTerm(
+        func=mdp.is_terminated_term,
+        weight=-50.0,
+        params={"term_keys": ["obstacle_hit", "base_contact"]},
+    )
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+    timeout_penalty = RewTerm(func=cbf_mdp.timeout_fired, weight=-50.0)
 
 
 @configclass
@@ -117,9 +138,8 @@ class GoalGo2EnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.sim.dt = LOW_LEVEL_ENV_CFG.sim.dt
         self.sim.render_interval = LOW_LEVEL_ENV_CFG.decimation
-        self.decimation = LOW_LEVEL_ENV_CFG.decimation * 10
-        self.episode_length_s = 20.0
-        self.scene.num_envs = 4
+        self.decimation = 4  # 50 Hz outer rate, matches inner locomotion (200 Hz / 4 = 50 Hz)
+        self.episode_length_s = 10.0
         if self.scene.contact_forces is not None:
             self.scene.contact_forces.update_period = self.sim.dt
 

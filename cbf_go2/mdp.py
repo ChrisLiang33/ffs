@@ -34,3 +34,47 @@ def in_collision(
     )  # (N, K, 2)
     dist = torch.linalg.norm(robot_xy.unsqueeze(1) - obs_xy, dim=2)
     return (dist < margin).any(dim=1)
+
+
+def velocity_to_goal(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """World-frame velocity component pointing at the goal (m/s, signed)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    cmd = env.command_manager.get_term(command_name)
+    dir_to_goal = cmd.pos_command_w[:, :2] - asset.data.root_pos_w[:, :2]
+    norm = torch.linalg.norm(dir_to_goal, dim=1, keepdim=True).clamp_min(1e-6)
+    unit = dir_to_goal / norm
+    return (asset.data.root_lin_vel_w[:, :2] * unit).sum(dim=1)
+
+
+def timeout_fired(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """1.0 on the step time_out fires (episode hit max length), else 0."""
+    return env.termination_manager.time_outs.float()
+
+
+def obstacles_body_frame(
+    env: ManagerBasedRLEnv,
+    obstacle_names: tuple,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Per-obstacle xy in robot body frame. Shape (N, K*2)."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    pos_w = asset.data.root_pos_w[:, :2]
+    quat = asset.data.root_quat_w
+    yaw = torch.atan2(
+        2 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
+        1 - 2 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
+    )
+    cos_y = torch.cos(yaw).unsqueeze(-1)
+    sin_y = torch.sin(yaw).unsqueeze(-1)
+
+    obs_xy_w = torch.stack(
+        [env.scene[name].data.root_pos_w[:, :2] for name in obstacle_names], dim=1
+    )
+    rel = obs_xy_w - pos_w.unsqueeze(1)  # (N, K, 2)
+    rel_x = cos_y * rel[..., 0] + sin_y * rel[..., 1]
+    rel_y = -sin_y * rel[..., 0] + cos_y * rel[..., 1]
+    return torch.stack([rel_x, rel_y], dim=-1).flatten(1)

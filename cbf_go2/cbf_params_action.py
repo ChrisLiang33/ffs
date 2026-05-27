@@ -42,10 +42,12 @@ class CBFParamsAction(ActionTerm):
 
     @property
     def processed_actions(self) -> torch.Tensor:
+        # raw policy output (Gaussian) -> normalized to [-1, 1] -> scaled to (alpha, phi) ranges
         a_lo, a_hi = self.cfg.alpha_range
         p_lo, p_hi = self.cfg.phi_range
-        alpha = self._raw_actions[:, 0].clamp(a_lo, a_hi)
-        phi = self._raw_actions[:, 1].clamp(p_lo, p_hi)
+        norm = self._raw_actions.clamp(-1.0, 1.0)
+        alpha = a_lo + (a_hi - a_lo) * (norm[:, 0] + 1.0) * 0.5
+        phi = p_lo + (p_hi - p_lo) * (norm[:, 1] + 1.0) * 0.5
         return torch.stack([alpha, phi], dim=1)
 
     def process_actions(self, actions: torch.Tensor):

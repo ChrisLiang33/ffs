@@ -51,9 +51,13 @@ unwrapped = env.unwrapped
 term_mgr = unwrapped.termination_manager
 device = unwrapped.device
 
+# action space is normalized [-1, 1] -> action term scales to (alpha, phi) ranges
+def to_norm(v, lo, hi):
+    return 2.0 * (v - lo) / (hi - lo) - 1.0
+
 action = torch.zeros((args.num_envs, 2), device=device)
-action[:, 0] = args.alpha
-action[:, 1] = args.phi
+action[:, 0] = to_norm(args.alpha, 0.1, 5.0)
+action[:, 1] = to_norm(args.phi, 0.01, 10.0)
 
 n_reached = 0
 n_crashed = 0

@@ -23,7 +23,7 @@ Frozen from here.
 - Goal: `UniformPose2dCommand` sampled in (-3, 3)² each reset. Visualized as a 2m green pole.
 - Outer action: `(alpha, phi)` — the CBF params, 2-d.
 - Inner: u_nom (unit vector to goal in body frame) → CBF safety filter → frozen locomotion checkpoint → joint targets → PD.
-- Outer rate: 5 Hz. Inner locomotion: 50 Hz. PD: 200 Hz.
+- Outer rate: 50 Hz (matches inner locomotion). PD: 200 Hz.
 - Terminations: time_out, base_contact, goal_reached (within 0.3m), obstacle_hit (robot center within 0.65m of any obstacle).
 
 ## 3. CBF safety filter (done)
@@ -40,26 +40,25 @@ A · u_xy + alpha · h - phi · ||A||² >= 0
 - Single linear constraint in `u_xy` → closed-form half-space projection. `omega_z` unconstrained. No QP solver.
 - Robot radius = 0.3m (between Go2's half-width 0.16 and half-diagonal 0.36, conservative-ish).
 
-## 4. ISSf baseline numbers
+## 4. Architecture
 
-[smoke.py](smoke.py) — fixed `(alpha, phi)` over ~150 episodes on rough flat:
-
-| setup                | reach | crash | timeout |
-|----------------------|-------|-------|---------|
-| no CBF (unsafe)      | 63%   | 36%   | 1%      |
-| CBF α=2.0 φ=0.2      | 90%   | 6%    | 4%      |
-| CBF α=2.0 φ=0.5      | 86%   | 6%    | 7%      |
-| CBF α=2.0 φ=1.0      | –     | –     | –       |
-| CBF α=2.0 φ=2.0      | 0%    | 35%   | 65%     |
-
-(φ=1.0 was only run in 1-env video mode — too small a sample to report.)
-φ=2 is over-conservative — robot can't make progress, so it sits and eventually times out / drifts into obstacles during the dwell. φ=0.5 is a reasonable ISSf baseline ([6%] residual crash is from locomotion tracking error of ~0.1 m/s; a perfectly executed CBF would be 0%).
-
-## 5. Architecture (done as of this commit)
-
-- CBF moved *inside* the env as a custom `ActionTerm` ([cbf_go2/cbf_params_action.py](cbf_go2/cbf_params_action.py)). Outer action space is exactly `(alpha, phi)`.
-- The RL policy will plug in next — same env, just send `(alpha, phi)` from a policy instead of a fixed constant.
+- CBF moved *inside* the env as a custom `ActionTerm` ([cbf_go2/cbf_params_action.py](cbf_go2/cbf_params_action.py)). Outer action space is exactly `(alpha, phi)`, normalized [-1, 1] then scaled to ranges.
 - ISSf baseline is now "fixed `(alpha=2.0, phi=0.5)` action through the same env" — no separate code path.
+- RL ([cbf_go2/rsl_rl_cfg.py](cbf_go2/rsl_rl_cfg.py)): PPO via rsl_rl, 3×128 ELU MLP, 4096 envs, 200 iters (~7 min on RTX 5090).
+- Rewards: dense progress (velocity toward goal) + goal_bonus (+50) + crash_penalty (-50) + timeout_penalty (-50) + action_rate (-0.05). Episode = 10s during training.
+
+## 5. ISSf vs RL — proper eval
+
+[eval_cbf.py](eval_cbf.py), 256 envs × 2000 outer steps, episode_length_s = 30, ~1300-1600 episodes per condition. Wilson 95% CIs.
+
+| method | reach | crash | timeout | time-to-reach |
+| --- | --- | --- | --- | --- |
+| ISSf (α=2, φ=0.5) | 87.4% [85.5, 89.1] | 4.0% [3.0, 5.2] | 8.6% | 17.5 sec |
+| **RL (model_199)** | **94.6% [93.4, 95.6]** | **1.2% [0.8, 1.8]** | **4.2%** | 18.1 sec |
+
+**RL dominates ISSf on both safety and reach**, non-overlapping CIs. RL trades ~0.6 sec speed for major reliability gain.
+
+Note: prior smoke runs gave ISSf 95%/1% — those were small-sample noise (~50-150 eps). Real ISSf is closer to 87%/4%.
 
 ## Things to push back on
 
