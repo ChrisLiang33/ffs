@@ -180,7 +180,7 @@ def tissf_action(
     obs_xy = torch.stack(
         [env.scene[name].data.root_pos_w[:, :2] for name in obstacle_names], dim=1
     )
-    sdf, sdf_grad = cbf.compute_sdf(robot.data.root_pos_w[:, :2], obs_xy, obstacle_radius, robot_radius)
+    sdf, sdf_grad, _ = cbf.compute_sdf(robot.data.root_pos_w[:, :2], obs_xy, obstacle_radius, robot_radius)
     h, _ = cbf.compute_h(sdf, sdf_grad, lam=h_lam, gamma=h_gamma)
     phi = (1.0 / epsilon_0) * torch.exp(-lam * h)
 

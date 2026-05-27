@@ -201,3 +201,59 @@ Per-step failures captured in `overnight_logs/`, don't abort the whole run. ETA 
   - Does any RL arch beat ISSf+TISSf on the *hardest* scene (`narrow`, `gauntlet`)?
 - If A wins clearly → distill RMA-style adapter (proprio history → priv embedding).
 - If everything ties on `in_dist` but RL pulls ahead on `narrow`/`gauntlet` → that's the OOD generalization story.
+
+## 12. Overnight ran — RL lost everywhere
+
+Headline (per-scene reach% / crash%, best of each method family):
+
+| scene    | rl_A      | rl_B      | rl_C      | rl_D      | issf*         | tissf*    |
+| -------- | --------- | --------- | --------- | --------- | ------------- | --------- |
+| in_dist  | 88.0/11.7 | 88.0/11.7 | 88.1/11.7 | 90.2/ 9.4 | **93.8/ 5.5** | 92.8/ 6.5 |
+| open     | 95.7/ 4.3 | 95.6/ 4.4 | 96.2/ 3.8 | 95.9/ 4.1 | 96.5/ 3.5     | 96.5/ 3.5 |
+| sparse   | 94.0/ 5.8 | 94.2/ 5.7 | 94.0/ 5.8 | 94.6/ 5.3 | 95.0/ 4.6     | 95.7/ 3.9 |
+| corridor | 88.9/10.6 | 88.9/10.4 | 88.0/11.5 | 90.2/ 9.3 | 93.9/ 4.6     | 94.0/ 4.6 |
+| slalom   | 90.4/ 9.0 | 90.0/ 9.4 | 89.1/10.4 | 91.6/ 7.8 | 93.9/ 4.7     | 93.8/ 4.9 |
+| narrow   | 94.0/ 5.7 | 93.7/ 5.8 | 94.0/ 5.6 | 94.8/ 4.8 | 95.1/ 4.4     | 95.1/ 4.3 |
+| gauntlet | 92.0/ 7.4 | 92.5/ 7.0 | 92.3/ 7.1 | 93.3/ 6.0 | 94.3/ 4.9     | 94.8/ 4.3 |
+
+**ISSf wins every scene on both axes.** And RL loses even on `in_dist` (the training distribution) — so this isn't a generalization gap.
+
+Among RL: D > C ≈ B ≈ A. LongHist is best by ~1–2 pts. **Priv (A) didn't help over no-priv (B)**, within noise.
+
+This is a regression vs the last clean win (Section 6, no full DR): RL had 93.3% / 0.5% there, ISSf 91.2% / 0.7%. Adding full DR + 4 archs + lidar-driven CBF + 400 PPO iters broke RL.
+
+## 13. Failure-mode diagnosis: action degeneracy
+
+Dumped the per-step (α, φ) policy actions on `corridor` for the iter-399 checkpoints:
+
+| arch | α median       | α p95 | φ median       | φ p95 |
+| ---- | -------------- | ----- | -------------- | ----- |
+| A    | **5.00 (max)** | 5.00  | **0.01 (min)** | 0.01  |
+| B    | 5.00 (max)     | 5.00  | 0.01 (min)     | 4.17  |
+| D    | 5.00 (max)     | 5.00  | 0.01 (min)     | 10.00 |
+
+ISSf anchor (which wins) is α=2.0, φ=0.5.
+
+**All 3 archs converged to α pegged at max and φ pegged at min.** Translation:
+
+- α=5 → most aggressive CBF (allows h to decay 2.5× faster than ISSf — get very close before reacting)
+- φ=0.01 → **input-to-state robustness term essentially off** — the ISSf becomes vanilla CBF with no margin
+
+So PPO learned "ignore robustness, push hard, sometimes crash" — the corner of the action space, ~10% crash rate. ISSf at (2.0, 0.5) sits in a much more conservative band and crashes ~5%.
+
+Things tried that didn't fix it:
+
+- **Heavier crash_penalty (-50 → -200)**: marginal improvement (rl_D crash 9.2 → 7.4% on corridor) but α still pegged at 5, φ still mostly pegged at 0.01. Arch A's distribution barely moved.
+
+Things considered but **not** taken:
+
+- **Tighter action ranges** (α∈[0.5,3], φ∈[0.1,2]): would cap the worst case but artificially constrains what RL can learn. Rejected — we want learned bounds, not hand-tuned ones.
+- **Iter-50 re-eval** (training-time peak): training logs showed iter-50 goal/crash ~ 84%/4% vs iter-399 ~ 83%/5.5%, a 1-pt difference on noisy training metrics. Not large enough to explain the 7-pt eval gap. Even if iter-50 was better, the action distribution likely has the same degeneracy. Skipped.
+
+## 14. Open question — is the CNN/encoder actually being used?
+
+The next diagnostic: **does the policy's action depend on what's in the BEV?** If a trained policy outputs identical (α, φ) distributions on `open` (empty BEV) vs `corridor` (4 obstacles), the encoder is being ignored and PPO learned a scene-blind degenerate policy. That would mean the CNN never learned to read obstacles — and the right α=5/φ=0 is the optimal *scene-blind* policy for the reward landscape.
+
+If actions DO depend on the BEV (e.g., higher φ on corridor than open), the encoder is alive but the reward shaping is still pushing PPO toward an aggressive operating point — and we need to look at reward weights again, or at why PPO can't find the ISSf-like local optimum.
+
+Test in flight: 6 evals (3 archs × 2 scenes) with action-dump.

@@ -103,6 +103,7 @@ def main(env_cfg, agent_cfg):
 
     ep_steps = torch.zeros(args.num_envs, device=device, dtype=torch.long)
     episodes: list[tuple[str, int]] = []  # (outcome, length)
+    action_samples: list[torch.Tensor] = []  # collect raw (norm) actions for RL only
 
     for _ in range(args.steps):
         # Re-apply each step so post-reset randomization gets overridden back to the scene.
@@ -110,6 +111,7 @@ def main(env_cfg, agent_cfg):
         with torch.inference_mode():
             if args.mode == "rl":
                 action = policy(obs)
+                action_samples.append(action.detach().clone().cpu())
             elif args.mode == "tissf":
                 action = tissf_action(
                     env.unwrapped,
@@ -156,6 +158,31 @@ def main(env_cfg, agent_cfg):
     if reach_lengths:
         mean_len = sum(reach_lengths) / len(reach_lengths)
         print(f"  mean steps to reach: {mean_len:.1f}   ({mean_len * 0.02:.2f} sec)")
+
+    # Action distribution (RL only): show what (alpha, phi) the policy actually picked.
+    action_stats = None
+    if args.mode == "rl" and action_samples:
+        all_acts = torch.cat(action_samples, dim=0).clamp(-1.0, 1.0)
+        alpha_lo, alpha_hi = 0.1, 5.0
+        phi_lo, phi_hi = 0.01, 10.0
+        alpha = (all_acts[:, 0] + 1.0) / 2.0 * (alpha_hi - alpha_lo) + alpha_lo
+        phi = (all_acts[:, 1] + 1.0) / 2.0 * (phi_hi - phi_lo) + phi_lo
+        pcts = [5, 25, 50, 75, 95]
+        a_p = [alpha.quantile(p / 100.0).item() for p in pcts]
+        p_p = [phi.quantile(p / 100.0).item() for p in pcts]
+        action_stats = {
+            "alpha_mean": alpha.mean().item(), "alpha_std": alpha.std().item(),
+            "alpha_pcts": dict(zip(pcts, a_p)),
+            "phi_mean": phi.mean().item(), "phi_std": phi.std().item(),
+            "phi_pcts": dict(zip(pcts, p_p)),
+            "n_samples": int(all_acts.shape[0]),
+        }
+        print()
+        print(f"  action dist (n={action_stats['n_samples']}):")
+        print(f"    alpha: mean={action_stats['alpha_mean']:.2f}  std={action_stats['alpha_std']:.2f}  "
+              f"pcts(5/25/50/75/95)= {a_p[0]:.2f} {a_p[1]:.2f} {a_p[2]:.2f} {a_p[3]:.2f} {a_p[4]:.2f}")
+        print(f"    phi:   mean={action_stats['phi_mean']:.2f}  std={action_stats['phi_std']:.2f}  "
+              f"pcts(5/25/50/75/95)= {p_p[0]:.2f} {p_p[1]:.2f} {p_p[2]:.2f} {p_p[3]:.2f} {p_p[4]:.2f}")
     print()
 
     if args.save:
@@ -171,6 +198,7 @@ def main(env_cfg, agent_cfg):
                 "mean_reach_steps": (sum(reach_lengths) / len(reach_lengths)) if reach_lengths else None,
             },
             "episodes": [{"outcome": o, "length": n} for o, n in episodes],
+            "action_stats": action_stats,
         }
         with open(args.save, "w") as f:
             json.dump(result, f, indent=2, default=str)

@@ -120,7 +120,7 @@ class RewardsCfg:
     )
     crash_penalty = RewTerm(
         func=mdp.is_terminated_term,
-        weight=-50.0,
+        weight=-200.0,
         params={"term_keys": ["obstacle_hit", "base_contact"]},
     )
     action_rate = RewTerm(func=cbf_mdp.action_rate_clamped, weight=-0.05)

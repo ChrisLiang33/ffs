@@ -49,6 +49,10 @@ def load_one(path: str) -> dict | None:
             label = "rl_C"
         else:
             label = "rl_A"
+        # Iter-tagged checkpoints (e.g. rl_archA_iter50_*.json) need their own
+        # row so they don't collapse with the final-checkpoint runs.
+        if "_iter50_" in os.path.basename(path):
+            label = f"{label}_i50"
         params = ""
     elif mode == "issf":
         label = "issf"
